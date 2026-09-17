@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+.pnpm-store
+**/.next
+**/dist
+**/__pycache__
+**/.venv
+**/.pytest_cache
+**/test-results
+**/playwright-report
+**/coverage
+.DS_Store
+artifacts

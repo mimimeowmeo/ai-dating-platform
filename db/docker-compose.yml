@@ -1,0 +1,82 @@
+
+name: heartlink-sandbox
+
+services:
+  heartlink-pg:
+    image: pgvector/pgvector:pg16
+    container_name: heartlink-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: heartlink
+      POSTGRES_PASSWORD: heartlink
+      POSTGRES_DB: heartlink
+    ports:
+      - "5433:5432"
+    volumes:
+      - heartlink_pg_data:/var/lib/postgresql/data
+      - ./01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./02_staging.sql:/docker-entrypoint-initdb.d/02_staging.sql:ro
+      - ./03_seed_traits.sql:/docker-entrypoint-initdb.d/03_seed_traits.sql:ro
+      - ./init_copy.sql:/docker-entrypoint-initdb.d/04_copy.sql:ro
+      - ./04_load.sql:/docker-entrypoint-initdb.d/05_load.sql:ro
+      - ./05_photos.sql:/docker-entrypoint-initdb.d/06_photos.sql:ro
+      - ./06_app_features.sql:/docker-entrypoint-initdb.d/07_app_features.sql:ro
+      - ./seed/heartlink.csv:/csv/heartlink.csv:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U heartlink -d heartlink"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  heartlink-adminer:
+    image: adminer:4
+    container_name: heartlink-adminer
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./adminer/index.php:/var/www/html/index.php:ro
+    depends_on:
+      heartlink-pg:
+        condition: service_healthy
+
+  heartlink-minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: heartlink-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: heartlink
+      MINIO_ROOT_PASSWORD: heartlink123
+    ports:
+      - "9002:9000"
+      - "9003:9001"
+    volumes:
+      - heartlink_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  heartlink-minio-init:
+    image: quay.io/minio/mc
+    depends_on:
+      heartlink-minio:
+        condition: service_healthy
+    volumes:
+      - ${HEARTLINK_IMAGES_DIR:-./seed/images}:/imgs:ro
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set hl http://heartlink-minio:9000 heartlink heartlink123
+        mc mb -p hl/heartlink-media
+        mc anonymous set download hl/heartlink-media
+        mc mirror --overwrite --quiet /imgs hl/heartlink-media/profiles
+        echo "圖片上傳完成"
+    restart: "no"
+
+volumes:
+  heartlink_pg_data:
+  heartlink_minio_data:

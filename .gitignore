@@ -1,0 +1,45 @@
+.DS_Store
+
+# 本機環境設定；範本可納入版本控制。
+.env
+.env.*
+!.env.example
+
+infrastructure/docker/volumes/
+
+# Node.js 依賴、快取與建置產物。
+node_modules/
+.pnpm-store/
+.next/
+dist/
+*.tsbuildinfo
+*.log
+
+# 測試產物。
+coverage/
+playwright-report/
+test-results/
+
+# Python 快取與虛擬環境。
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# 本機工具設定與教學註解備份。
+.claude/
+.learn/
+
+# 每位開發者自己的 compose 覆寫；會引用只存在本機的 external volume。
+docker-compose.override.yml
+
+# 資料庫備份；含帳號、密碼雜湊、session token 與訊息內容，絕不可納入版本控制。
+backups/
+*.sql.gz
+*.dump
+
+# 產生的資料與擷取結果。
+# db/seed 與 outputs 的 CSV 衍生自 CelebA，該資料集限非商業研究用途，不隨專案散布。
+outputs/
+artifacts/
+db/seed/*.csv

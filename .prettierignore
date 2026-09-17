@@ -1,0 +1,10 @@
+node_modules
+.pnpm-store
+**/node_modules
+**/dist
+**/.next
+**/test-results
+**/playwright-report
+**/.venv
+**/__pycache__
+pnpm-lock.yaml

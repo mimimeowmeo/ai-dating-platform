@@ -1,0 +1,6 @@
+**
+!services/
+!services/ai/
+!services/ai/requirements.txt
+!services/ai/app/
+!services/ai/app/*.py

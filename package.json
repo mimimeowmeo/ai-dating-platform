@@ -1,0 +1,35 @@
+{
+  "name": "ai-dating-platform",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AI 交友平台的 monorepo 根套件",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "setup": "node scripts/setup-env.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "lint": "eslint apps scripts eslint.config.mjs",
+    "test": "node scripts/with-env.mjs pnpm --filter @dating/api test",
+    "test:e2e": "node scripts/with-env.mjs node scripts/e2e.mjs",
+    "db:generate": "pnpm --filter @dating/api prisma:generate",
+    "db:migrate": "node scripts/with-env.mjs pnpm --filter @dating/api prisma:migrate",
+    "db:seed": "node scripts/with-env.mjs pnpm --filter @dating/api prisma:seed",
+    "db:admin": "docker compose --profile tools up -d adminer",
+    "infra:up": "docker compose up -d --wait postgres redis minio",
+    "docker:up": "docker compose up -d --build --wait",
+    "docker:down": "docker compose down",
+    "docker:status": "docker compose ps",
+    "format": "prettier --write apps scripts .github docker-compose.yml package.json pnpm-workspace.yaml"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.6",
+    "typescript-eslint": "^8.70.0"
+  }
+}

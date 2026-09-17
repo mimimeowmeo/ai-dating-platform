@@ -1,0 +1,36 @@
+name: Phase 1–7 checks
+on:
+  push:
+  pull_request:
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g pnpm@11.19.0
+      - run: pnpm setup
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm build
+      - run: docker compose up -d --build --wait --wait-timeout 180
+      - run: pnpm test
+        env:
+          TEST_API_URL: http://127.0.0.1:8080/api/v1
+      - run: docker compose run --rm --no-deps -v "$PWD/services/ai/tests:/app/tests:ro" ai python -m unittest discover -s tests -v
+      - run: pnpm --filter @dating/web exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - run: pnpm audit --prod --audit-level high
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+      - run: docker compose down
+        if: always()
