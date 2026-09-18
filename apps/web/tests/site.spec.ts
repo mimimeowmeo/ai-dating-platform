@@ -170,8 +170,10 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
       .getByRole("textbox", { name: "訊息內容" })
       .fill("你好，這是一段真實的即時對話！");
     await a.getByRole("button", { name: "傳送訊息" }).click();
+    // 收窄到訊息氣泡：同一段文字也會出現在左側對話列表的預覽，
+    // 只用 getByText 會同時命中兩個元素而觸發 strict mode violation。
     await expect(
-      b.getByText("你好，這是一段真實的即時對話！", { exact: true }),
+      b.locator(".bubble", { hasText: "你好，這是一段真實的即時對話！" }),
     ).toBeVisible();
     await expect(a.getByText(/已讀/)).toBeVisible();
     await a.reload();
@@ -189,7 +191,7 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
       .fill("登入續期後仍可聊天");
     await a.getByRole("button", { name: "傳送訊息" }).click();
     await expect(
-      b.getByText("登入續期後仍可聊天", { exact: true }),
+      b.locator(".bubble", { hasText: "登入續期後仍可聊天" }),
     ).toBeVisible();
   } finally {
     await Promise.all(contexts.map((c) => c.close()));
