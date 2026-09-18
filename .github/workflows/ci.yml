@@ -17,12 +17,18 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm build
-      - run: docker compose up -d --build --wait --wait-timeout 180
+      # 主 compose 的資料庫／物件儲存定義在 docker-compose.override.yml，
+      # 那個檔案不進版控，所以 CI 改用自包含的 docker-compose.ci.yml。
+      - run: docker compose -f docker-compose.ci.yml up -d --build --wait --wait-timeout 180
       - run: pnpm test
         env:
           TEST_API_URL: http://127.0.0.1:8080/api/v1
-      - run: docker compose run --rm --no-deps -v "$PWD/services/ai/tests:/app/tests:ro" ai python -m unittest discover -s tests -v
       - run: pnpm --filter @dating/web exec playwright install --with-deps chromium
+      # 上一步的 integration 測試與接下來的 e2e 共用同一個來源 IP，
+      # 合計建立的帳號數會超過註冊限流的 20 次／5 分鐘
+      # （apps/api/src/auth.ts 的 limit(`auth:${ip}`, 20, 300)），
+      # 撞到之後的測試會以「註冊後停在 /register」的形式假性失敗。
+      - run: docker compose -f docker-compose.ci.yml exec -T redis sh -c "redis-cli --scan --pattern 'rate:*' | xargs -r redis-cli DEL"
       - run: pnpm test:e2e
       - run: pnpm audit --prod --audit-level high
       - uses: actions/upload-artifact@v4
@@ -32,5 +38,5 @@ jobs:
           path: |
             apps/web/playwright-report
             apps/web/test-results
-      - run: docker compose down
+      - run: docker compose -f docker-compose.ci.yml down -v
         if: always()

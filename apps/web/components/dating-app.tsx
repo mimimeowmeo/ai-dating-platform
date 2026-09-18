@@ -1,7 +1,13 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -12,28 +18,28 @@ import {
   ArrowUpRight,
   Bell,
   Check,
+  CheckCheck,
   ChevronLeft,
+  Camera,
   Compass,
   Heart,
   Loader2,
   LogOut,
   MapPin,
   MessageCircle,
-  Send,
+  Moon,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Sun,
   UserRound,
   X,
-  Camera,
-  CheckCheck,
 } from "lucide-react";
 import {
   api,
   refresh,
   send,
   useAuth,
-  intentLabels,
   genderLabels,
   type Card,
   type Profile,
@@ -43,6 +49,18 @@ import {
   type Message,
   type User,
 } from "@/lib/api";
+import { HeartIcon, LogoMark } from "@/components/icons";
+import {
+  categoryTitle,
+  datingGoalLimit,
+  groupTraits,
+  rememberTraitLabels,
+  traitCategories,
+  traitLabel,
+  traitSnapshot,
+  traitsOf,
+  type TraitRow,
+} from "@/lib/traits";
 function useData<T>(path: string) {
   const user = useAuth((s) => s.user);
   return useQuery<T>({
@@ -50,6 +68,22 @@ function useData<T>(path: string) {
     queryFn: () => api<T>(path),
     enabled: !!user,
   });
+}
+// 選項清單來自後端 GET /traits；先用內建快照顯示，拿到資料後再更新。
+function useTraitCatalog() {
+  const user = useAuth((s) => s.user);
+  const query = useQuery<TraitRow[]>({
+    queryKey: ["/traits"],
+    queryFn: () => api<TraitRow[]>("/traits"),
+    enabled: !!user,
+    staleTime: 60 * 60 * 1000,
+    initialData: traitSnapshot,
+    initialDataUpdatedAt: 0,
+  });
+  useEffect(() => {
+    rememberTraitLabels(query.data);
+  }, [query.data]);
+  return query.data;
 }
 function ErrorText({ message }: { message?: string }) {
   return message ? (
@@ -62,7 +96,7 @@ function Loading() {
   return (
     <div className="empty">
       <Loader2 className="spin" />
-      <p>正在準備你的遇見…</p>
+      <p>正在準備你的心動…</p>
     </div>
   );
 }
@@ -110,12 +144,159 @@ function Portrait({
     </div>
   );
 }
-const nav = [
-  { href: "/discover", label: "探索", icon: Compass },
-  { href: "/matches", label: "配對", icon: Heart },
-  { href: "/messages", label: "訊息", icon: MessageCircle },
-  { href: "/profile", label: "我的檔案", icon: UserRound },
+function Logo({ href, light = false }: { href: string; light?: boolean }) {
+  return (
+    <Link href={href} className={light ? "logo light" : "logo"}>
+      <LogoMark />
+      <span className="logo-word">HeartLink.</span>
+    </Link>
+  );
+}
+// 設計稿的文字頭像：中文名取最後一個字（小晴 → 晴），其他取第一個字母。
+function initialOf(name: string) {
+  const chars = Array.from(name.trim());
+  const last = chars.at(-1) ?? "";
+  return /\p{Script=Han}/u.test(last) ? last : (chars[0] ?? "").toUpperCase();
+}
+function Avatar({
+  name,
+  tone = 0,
+  size,
+}: {
+  name: string;
+  tone?: number;
+  size?: "md" | "sm";
+}) {
+  return (
+    <span
+      className={["avatar", tone % 2 ? "violet" : "", size]
+        .filter(Boolean)
+        .join(" ")}
+      aria-hidden="true"
+    >
+      {initialOf(name)}
+    </span>
+  );
+}
+const clock = (iso: string) =>
+  new Date(iso).toLocaleTimeString("zh-TW", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+function daysAgo(iso: string) {
+  const day = (d: Date) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  return Math.round((day(new Date()) - day(new Date(iso))) / 86_400_000);
+}
+function listTime(iso?: string) {
+  if (!iso) return "";
+  const days = daysAgo(iso);
+  if (days <= 0) return clock(iso);
+  if (days === 1) return "昨天";
+  return new Date(iso).toLocaleDateString(
+    "zh-TW",
+    days < 7 ? { weekday: "short" } : { month: "numeric", day: "numeric" },
+  );
+}
+function dayLabel(iso: string) {
+  const days = daysAgo(iso);
+  const day =
+    days <= 0
+      ? "今天"
+      : days === 1
+        ? "昨天"
+        : new Date(iso).toLocaleDateString("zh-TW", {
+            month: "long",
+            day: "numeric",
+          });
+  return `${day} ${clock(iso)}`;
+}
+function matchedLabel(iso: string) {
+  const hours = (Date.now() - new Date(iso).getTime()) / 3_600_000;
+  if (hours >= 24) return null;
+  return hours < 1 ? "剛剛互相喜歡" : `${Math.floor(hours)} 小時前互相喜歡`;
+}
+function ageOf(birthDate: string) {
+  const [y, m, d] = birthDate.slice(0, 10).split("-").map(Number);
+  const now = new Date();
+  const month = now.getMonth() + 1;
+  const beforeBirthday = month < m || (month === m && now.getDate() < d);
+  return now.getFullYear() - y - (beforeBirthday ? 1 : 0);
+}
+// 探索偏好拉桿的範圍，與後端 preferencesInput 的上下限一致。
+const ageRange = [18, 130];
+const heightRange = [130, 250];
+const distanceRange = [1, 2000];
+// 一條軌道兩個把手：用百分比標出目前選到的區間。
+const rangeStyle = (
+  [min, max]: number[],
+  low: number,
+  high: number,
+): CSSProperties =>
+  ({
+    "--low": (low - min) / (max - min),
+    "--high": (high - min) / (max - min),
+  }) as CSSProperties;
+const goalText = (codes?: string[]) =>
+  codes?.length ? codes.map(traitLabel).join("、") : "";
+// 新帳號要先補齊這幾項才能進站；照片必須先存好基本資料才能上傳。
+const onboardingSteps = (profile?: Profile | null) => [
+  {
+    label: "基本資料",
+    done: !!profile?.displayName && !!profile.city && !!profile.bio.trim(),
+  },
+  { label: "想遇見的關係", done: !!profile?.datingGoals.length },
+  { label: "我的小熱愛", done: !!profile?.traits.length },
+  { label: "一張生活照", done: !!profile?.photos.length },
 ];
+const onboardingLeft = (profile?: Profile | null) =>
+  onboardingSteps(profile).filter((step) => !step.done);
+const nav = [
+  { href: "/discover", label: "探索心動", icon: Compass },
+  { href: "/matches", label: "我的配對", icon: Heart },
+  { href: "/messages", label: "聊天室", icon: MessageCircle },
+  { href: "/profile", label: "個人檔案", icon: UserRound },
+];
+// 側欄下半部：設定類的入口，與舊版位置一致。
+const sideExtras = [
+  { href: "/preferences", label: "探索偏好", icon: Settings2 },
+  { href: "/verification", label: "真人驗證", icon: ShieldCheck },
+];
+type NavEntry = {
+  href: string;
+  label: string;
+  icon: (props: { size?: number }) => React.ReactNode;
+};
+// 側欄項目：沿用舊版的 icon + 文字，目前所在的頁面右側加一個小圓點。
+function navItem(n: NavEntry, locked: boolean, path: string, size = 22) {
+  const active = path.startsWith(n.href);
+  if (locked && n.href !== "/profile")
+    return (
+      <span
+        key={n.href}
+        className="nav-item locked"
+        aria-disabled="true"
+        title="完成個人檔案後解鎖"
+      >
+        <n.icon size={size} />
+        <span>{n.label}</span>
+      </span>
+    );
+  return (
+    <Link
+      key={n.href}
+      href={n.href}
+      title={n.label}
+      aria-current={active ? "page" : undefined}
+      className={active ? "nav-item active" : "nav-item"}
+    >
+      <n.icon size={size} />
+      <span>{n.label}</span>
+      {active && <i />}
+    </Link>
+  );
+}
 export function DatingApp() {
   const path = usePathname();
   const router = useRouter();
@@ -123,6 +304,13 @@ export function DatingApp() {
   const client = useQueryClient();
   const [socket, setSocket] = useState<Socket | null>(null);
   const token = useAuth((s) => s.token);
+  const profile = useData<Profile | null>("/profile");
+  // 個人檔案沒補齊之前只能待在個人檔案頁，其他頁面與連結都先鎖住。
+  const locked = profile.isSuccess && onboardingLeft(profile.data).length > 0;
+  useEffect(() => {
+    if (locked && !["/", "/login", "/register", "/profile"].includes(path))
+      router.replace("/profile");
+  }, [locked, path, router]);
   useEffect(() => {
     if (!ready) return;
     if (!user && !["/", "/login", "/register"].includes(path))
@@ -199,82 +387,29 @@ export function DatingApp() {
       router.push("/login");
     }
   };
-  const active = nav.find((n) => path.startsWith(n.href));
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <Link href="/discover" className="brand">
-          <span className="brand-mark">m</span>遇見
-          <span className="brand-en">meet</span>
-        </Link>
+        <Logo href={locked ? "/profile" : "/discover"} />
+        <p className="sidebar-tagline">每一次相遇，都值得期待</p>
         <span className="eyebrow nav-label">YOUR NEXT CHAPTER</span>
-        <nav>
-          {nav.map((n) => (
-            <Link
-              key={n.href}
-              href={n.href}
-              className={
-                path.startsWith(n.href) ? "nav-item active" : "nav-item"
-              }
-            >
-              <n.icon size={22} />
-              <span>{n.label}</span>
-              {path.startsWith(n.href) && <i />}
-            </Link>
-          ))}
+        <nav className="side-nav" aria-label="主要頁面">
+          {nav.map((n) => navItem(n, locked, path))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="small-note">
-            <Sparkles size={20} />
-            <p>
-              好的關係，
-              <br />
-              從做自己開始。
-            </p>
-          </div>
-          <Link href="/preferences" className="nav-item">
-            <Settings2 size={20} />
-            探索偏好
-          </Link>
-          <Link href="/verification" className="nav-item">
-            <ShieldCheck size={20} />
-            真人驗證
-          </Link>
-          <button className="nav-item" onClick={logout}>
+          {sideExtras.map((n) => navItem(n, locked, path, 20))}
+          <button type="button" className="nav-item" onClick={logout}>
             <LogOut size={20} />
-            登出
+            <span>登出</span>
           </button>
+          <SidebarUser user={user} />
         </div>
       </aside>
       <div className="workspace">
         <header className="topbar">
-          <span className="breadcrumb">
-            遇見 / <b>{active?.label || "帳號設定"}</b>
-          </span>
-          <div className="top-actions">
-            <button
-              className="icon-button mobile-logout"
-              aria-label="登出"
-              onClick={logout}
-            >
-              <LogOut size={20} />
-            </button>
-            <span className="local-badge">慢一點，也很好</span>
-            <Link
-              href="/notifications"
-              aria-label="通知"
-              className="icon-button"
-            >
-              <Bell size={20} />
-            </Link>
-            <Link
-              href="/profile"
-              className="mini-avatar"
-              aria-label="我的個人資料"
-            >
-              {user.email.slice(0, 1).toUpperCase()}
-            </Link>
-          </div>
+          <Logo href={locked ? "/profile" : "/discover"} />
+          <p className="topbar-tagline">讓緣分，從這裡開始。</p>
+          <TopActions user={user} onLogout={logout} locked={locked} />
         </header>
         <main className="main-content">
           {path === "/discover" ? (
@@ -300,22 +435,112 @@ export function DatingApp() {
             />
           )}
         </main>
-        <footer className="app-footer">
-          MEET SOMEONE. BE YOURSELF.<span>讓每一次遇見，都有意義。</span>
-        </footer>
       </div>
-      <nav className="mobile-nav">
-        {nav.map((n) => (
-          <Link
-            key={n.href}
-            href={n.href}
-            className={path.startsWith(n.href) ? "active" : ""}
-          >
-            <n.icon size={21} />
-            {n.label}
-          </Link>
-        ))}
+      <nav className="mobile-nav" aria-label="主要頁面">
+        {nav.map((n) => {
+          const active = path.startsWith(n.href);
+          return locked && n.href !== "/profile" ? (
+            <span key={n.href} className="locked" aria-disabled="true">
+              <n.icon size={21} />
+              {n.label}
+            </span>
+          ) : (
+            <Link
+              key={n.href}
+              href={n.href}
+              aria-current={active ? "page" : undefined}
+              className={active ? "active" : ""}
+            >
+              <n.icon size={21} />
+              {n.label}
+            </Link>
+          );
+        })}
       </nav>
+    </div>
+  );
+}
+function SidebarUser({ user }: { user: User }) {
+  const profile = useData<Profile | null>("/profile");
+  return (
+    <p className="side-user">
+      <span>{profile.data?.displayName || user.email.split("@")[0]}</span>
+      <span className="side-user-status">
+        {" · "}
+        <Link href="/verification">
+          {user.isVerified ? "已驗證" : "尚未驗證"}
+        </Link>
+      </span>
+    </p>
+  );
+}
+// 日夜模式：實際的切換寫在 <html data-theme>，重新整理前由 layout 的小腳本先套用。
+function ThemeToggle() {
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    setDark(document.documentElement.dataset.theme === "dark");
+  }, []);
+  const toggle = () => {
+    const next = dark ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem("theme", next);
+    } catch {
+      // 無痕視窗不能寫入時，至少這一次切換仍然生效。
+    }
+    setDark(!dark);
+  };
+  return (
+    <button
+      type="button"
+      className="icon-button"
+      onClick={toggle}
+      aria-label={dark ? "切換到日間模式" : "切換到夜間模式"}
+    >
+      {dark ? <Sun size={19} /> : <Moon size={19} />}
+    </button>
+  );
+}
+function TopActions({
+  user,
+  onLogout,
+  locked,
+}: {
+  user: User;
+  onLogout: () => void;
+  locked: boolean;
+}) {
+  const profile = useData<Profile | null>("/profile");
+  const notifications = useData<{ readAt: string | null }[]>("/notifications");
+  const unread = notifications.data?.filter((n) => !n.readAt).length || 0;
+  return (
+    <div className="top-actions">
+      <ThemeToggle />
+      {locked ? (
+        <span className="icon-button locked" aria-disabled="true" title="通知">
+          <Bell size={19} />
+        </span>
+      ) : (
+        <Link href="/notifications" className="icon-button" aria-label="通知">
+          <Bell size={19} />
+          {unread > 0 && <span className="count">{unread}</span>}
+        </Link>
+      )}
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="登出"
+        onClick={onLogout}
+      >
+        <LogOut size={19} />
+      </button>
+      <Link href="/profile" className="top-avatar" aria-label="我的個人檔案">
+        {profile.data ? (
+          <Portrait person={profile.data} />
+        ) : (
+          <Avatar name={user.email} size="sm" />
+        )}
+      </Link>
     </div>
   );
 }
@@ -324,10 +549,7 @@ function Landing() {
   return (
     <div className="landing">
       <header>
-        <Link href="/" className="brand">
-          <span className="brand-mark">m</span>遇見
-          <span className="brand-en">meet</span>
-        </Link>
+        <Logo href="/" />
         <Link className="button secondary" href={user ? "/discover" : "/login"}>
           {user ? "開始探索" : "登入"}
           <ArrowUpRight size={18} />
@@ -348,10 +570,7 @@ function Landing() {
             <br />
             讓真實的你，遇見剛剛好的關係。
           </p>
-          <Link
-            className="button coral big"
-            href={user ? "/discover" : "/register"}
-          >
+          <Link className="button big" href={user ? "/discover" : "/register"}>
             開始你的故事
             <ArrowRight size={20} />
           </Link>
@@ -375,7 +594,7 @@ function Landing() {
             <small>共同喜好，是故事的起點。</small>
           </div>
           <div className="abstract-card card-two">
-            <Heart size={58} strokeWidth={1.2} />
+            <HeartIcon size={58} />
             <span>
               HELLO,
               <br />
@@ -385,7 +604,7 @@ function Landing() {
             </span>
           </div>
           <div className="floating-note">
-            <Sparkles size={18} /> 為真實的相遇，留一點空間。
+            <Sparkles size={18} /> 每一次相遇，都值得期待。
           </div>
         </div>
       </main>
@@ -407,7 +626,8 @@ function Landing() {
         </div>
       </section>
       <footer>
-        遇見 meet <span>給關係一點可能，給自己一點時間。</span>
+        <span className="logo-word">HeartLink.</span>
+        <span>讓緣分，從這裡開始。</span>
       </footer>
     </div>
   );
@@ -441,9 +661,7 @@ function AuthPage({ register }: { register: boolean }) {
   return (
     <div className="auth-layout">
       <aside>
-        <Link href="/" className="brand light">
-          <span className="brand-mark">m</span>遇見 meet
-        </Link>
+        <Logo href="/" light />
         <div>
           <span className="eyebrow">A LITTLE HELLO GOES A LONG WAY</span>
           <h1>
@@ -451,9 +669,11 @@ function AuthPage({ register }: { register: boolean }) {
             <br />
             從一句你好開始。
           </h1>
-          <div className="auth-flower">✳</div>
+          <div className="auth-flower">
+            <HeartIcon size={120} />
+          </div>
         </div>
-        <small>每段故事，從真實開始。</small>
+        <small>每一次相遇，都值得期待。</small>
       </aside>
       <main>
         <Link className="text-link" href="/">
@@ -513,7 +733,7 @@ function AuthPage({ register }: { register: boolean }) {
             </button>
           </form>
           <p className="auth-switch">
-            {register ? "已經有帳號？" : "第一次來到遇見？"}
+            {register ? "已經有帳號？" : "第一次來到 HeartLink？"}
             <Link href={register ? "/login" : "/register"}>
               {register ? "立即登入" : "建立帳號"}
             </Link>
@@ -527,28 +747,129 @@ function Heading({
   overline,
   title,
   text,
+  heart = false,
   children,
 }: {
   overline: string;
   title: string;
   text: string;
+  heart?: boolean;
   children?: React.ReactNode;
 }) {
   return (
-    <div className="page-heading">
-      <div>
-        <span className="eyebrow">{overline}</span>
-        <h1>{title}</h1>
-        <p>{text}</p>
-      </div>
+    <div className={children ? "page-heading has-actions" : "page-heading"}>
+      <span className="eyebrow">{overline}</span>
+      <h1>
+        {title}
+        {heart && <HeartIcon className="title-heart" />}
+      </h1>
+      <p>{text}</p>
       {children}
     </div>
+  );
+}
+type Person = Pick<
+  Card,
+  | "displayName"
+  | "age"
+  | "city"
+  | "bio"
+  | "datingIntent"
+  | "traits"
+  | "datingGoals"
+  | "photos"
+  | "isVerified"
+>;
+function PersonCard({
+  person,
+  children,
+}: {
+  person: Person;
+  children?: React.ReactNode;
+}) {
+  const tags = person.traits ?? [];
+  return (
+    <article className="person-card">
+      <div className="person-photo">
+        <Portrait person={person} large />
+      </div>
+      <div className="person-info">
+        <span className="eyebrow">NICE TO MEET YOU</span>
+        <h2>
+          {person.displayName}
+          <span>{person.age}</span>
+          {person.isVerified && (
+            <ShieldCheck size={24} aria-label="已通過驗證" />
+          )}
+        </h2>
+        <p className="person-meta">
+          <MapPin size={15} />
+          {[person.city, goalText(person.datingGoals)]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+        <p className="field-label">關於我</p>
+        <p className="person-bio">
+          {person.bio || "有些故事，適合在對話裡慢慢認識。"}
+        </p>
+        {tags.length > 0 && (
+          <>
+            <p className="field-label">我的小小熱愛</p>
+            <div className="tags hash">
+              {tags.map((code) => (
+                <span key={code}>{traitLabel(code)}</span>
+              ))}
+            </div>
+          </>
+        )}
+        {children}
+      </div>
+    </article>
+  );
+}
+function PersonDialog({
+  person,
+  onClose,
+}: {
+  person: Person;
+  onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const current = dialog.current;
+    if (current && !current.open) current.showModal();
+    return () => current?.close();
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="person-dialog"
+      aria-label={`${person.displayName}的檔案`}
+      onClose={(e) => {
+        // 開發模式的 StrictMode 會先關再開；只有真的關閉（例如按 Esc）才通知上層。
+        if (!e.currentTarget.open) onClose();
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="dialog-body">
+        <button
+          type="button"
+          className="dialog-close"
+          aria-label="關閉"
+          onClick={onClose}
+        >
+          <X size={18} />
+        </button>
+        <PersonCard person={person} />
+      </div>
+    </dialog>
   );
 }
 function Discover() {
   const query = useData<Card[]>("/discovery");
   const profile = useData<Profile | null>("/profile");
-  const preferences = useData<Preferences>("/preferences");
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -575,27 +896,21 @@ function Discover() {
   return (
     <>
       <Heading
-        overline="DISCOVER YOUR KIND OF PERSON"
-        title="今天，想遇見誰？"
-        text="從共同喜好開始，讓故事自然發生。"
+        overline="A LITTLE SPARK"
+        title="探索心動"
+        heart
+        text="在日常裡，遇見一點不一樣的心動。"
       >
         <Link className="button secondary" href="/preferences">
-          <Settings2 size={17} />
-          調整偏好
+          探索偏好
         </Link>
       </Heading>
       <div className="discover-layout">
-        <section>
-          <div className="section-label">
-            <span>
-              <i className="dot" /> 為你探索
-            </span>
-            <small>{query.data?.length || 0} 個可能的開始</small>
-          </div>
+        <section className="discover-main" aria-label="為你探索">
           <ErrorText message={error || query.error?.message} />
           {match && (
             <div className="success" role="status">
-              <Heart size={20} />
+              <HeartIcon filled size={20} />
               你們互相喜歡！<Link href="/matches">開始聊聊 →</Link>
               <button aria-label="關閉配對提示" onClick={() => setMatch(false)}>
                 <X size={16} />
@@ -619,100 +934,87 @@ function Discover() {
               label="調整探索範圍"
             />
           ) : (
-            <>
-              <article className="discovery-card">
-                <div className="discovery-image">
-                  <Portrait person={person} large />
-                  <span className="image-badge">
-                    <MapPin size={14} />
-                    {person.city}
-                  </span>
-                  <div className="image-caption">
-                    <h2>
-                      {person.displayName}
-                      <span>{person.age}</span>
-                      {person.isVerified && (
-                        <ShieldCheck size={25} aria-label="已通過驗證" />
-                      )}
-                    </h2>
-                    <p>{intentLabels[person.datingIntent]}</p>
-                  </div>
-                </div>
-                <div className="card-copy">
-                  <span className="eyebrow">A LITTLE ABOUT ME</span>
-                  <p>{person.bio || "有些故事，適合在對話裡慢慢認識。"}</p>
-                  <div className="tags">
-                    {[
-                      ...person.interests,
-                      ...person.hobbies,
-                      ...person.foods,
-                    ].map((tag) => (
-                      <span key={tag}>{tag}</span>
-                    ))}
-                  </div>
-                </div>
-              </article>
+            <PersonCard person={person}>
               <div className="discovery-actions">
                 <button
-                  className="round-button pass"
+                  className="action-button pass"
                   disabled={busy}
                   onClick={() => act("pass")}
-                  aria-label="略過"
                 >
-                  <X size={26} />
+                  <X size={26} strokeWidth={1.5} />
+                  略過
                 </button>
-                <span>跟著感覺，慢慢來。</span>
                 <button
-                  className="round-button like"
+                  className="action-button like"
                   disabled={busy}
                   onClick={() => act("like")}
-                  aria-label="喜歡"
                 >
-                  <Heart size={27} />
+                  <HeartIcon filled size={26} />
+                  喜歡
                 </button>
               </div>
-            </>
+            </PersonCard>
           )}
-        </section>
-        <aside className="discover-aside">
-          <div className="note-card">
-            <Sparkles size={25} />
-            <h3>
-              不用很完美，
-              <br />
-              只要很真實。
-            </h3>
-            <p>比起精心設計的開場白，一個真誠的好奇，往往更動人。</p>
-            <span>BE YOURSELF. ALWAYS.</span>
-          </div>
-          <div className="preference-card">
-            <h3>你的探索指南</h3>
-            <p>
-              <MapPin size={17} />
-              {profile.data?.city || "尚未設定城市"}附近
-            </p>
-            <p>
-              <UserRound size={17} />
-              {preferences.data
-                ? `${preferences.data.minAge}–${preferences.data.maxAge} 歲 · ${genderLabels[preferences.data.preferredGender]}`
-                : "讀取中…"}
-            </p>
-            <p>
-              <Compass size={17} />
-              {preferences.data?.maxDistanceKm || 100} 公里內
-            </p>
-            <Link href="/preferences">
-              編輯偏好
-              <ArrowUpRight size={16} />
-            </Link>
-          </div>
-          <p className="muted footnote">
-            <ShieldCheck size={16} />
-            彼此喜歡才開啟聊天。你隨時可以封鎖或結束配對。
+          <p className="soft-note">
+            <HeartIcon size={15} />
+            慢慢認識，不急著心動。
           </p>
-        </aside>
+        </section>
+        <DiscoverAside />
       </div>
     </>
+  );
+}
+function DiscoverAside() {
+  const matches = useData<Match[]>("/matches");
+  const conversations = useData<Conversation[]>("/conversations");
+  return (
+    <aside className="discover-aside">
+      <section className="side-card">
+        <h2>
+          新的連結
+          <HeartIcon size={24} />
+        </h2>
+        <p className="side-card-note">有人也想多認識你一點</p>
+        {matches.data?.length ? (
+          <ul className="mini-matches">
+            {matches.data.slice(0, 3).map((m) => (
+              <li key={m.id}>
+                <Link href={`/messages/${m.conversationId}`}>
+                  <Portrait person={m.otherUser} />
+                  <span>{m.otherUser.displayName}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="side-card-note">互相喜歡後，會在這裡相遇。</p>
+        )}
+        <Link className="button secondary" href="/matches">
+          查看所有配對
+        </Link>
+      </section>
+      <section className="side-card">
+        <h2>最近的對話</h2>
+        {conversations.data?.length ? (
+          <ul className="mini-conversations">
+            {conversations.data.slice(0, 3).map((c) => (
+              <li key={c.id}>
+                <Link href={`/messages/${c.id}`}>
+                  <b>{c.otherUser.displayName}</b>
+                  <span>{c.lastMessage?.content || "從一句你好開始吧。"}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="side-card-note">配對成功後，就能開始聊天。</p>
+        )}
+        <Link className="button secondary" href="/messages">
+          前往聊天室
+        </Link>
+      </section>
+    </aside>
   );
 }
 const cities = [
@@ -725,121 +1027,293 @@ const cities = [
   { name: "新竹市", lat: 24.8138, lng: 120.9675 },
   { name: "花蓮市", lat: 23.991, lng: 121.6112 },
 ];
-const profileFields = [
-  "displayName",
-  "birthDate",
-  "gender",
-  "bio",
-  "city",
-  "datingIntent",
-  "occupation",
-  "education",
-] as const;
-const tagGroups = ["interests", "hobbies", "foods"] as const;
-type ProfileForm = Record<(typeof profileFields)[number], string>;
-type Tags = Record<(typeof tagGroups)[number], string[]>;
-const formOf = (p: Profile): ProfileForm => ({
-  displayName: p.displayName,
-  birthDate: p.birthDate,
-  gender: p.gender,
-  bio: p.bio,
-  city: p.city,
-  datingIntent: p.datingIntent,
-  occupation: p.occupation || "",
-  education: p.education || "",
-});
-const tagsOf = (p: Profile): Tags => ({
-  interests: p.interests,
-  hobbies: p.hobbies,
-  foods: p.foods,
-});
-const sameTags = (a: string[], b: string[]) =>
-  a.length === b.length && a.every((tag, i) => tag === b[i]);
 const photoLimit = 8 * 1024 * 1024;
 const photoTooLarge = "照片太大，請選擇 8 MB 以內的檔案。";
+function OnboardingPanel({
+  profile,
+  notice,
+}: {
+  profile?: Profile | null;
+  notice: string;
+}) {
+  return (
+    <section className="panel onboarding">
+      <h2>完成這幾項，就能開始探索</h2>
+      <p className="muted">
+        第一次使用要先把個人檔案填完，其他頁面會在完成後解鎖。
+      </p>
+      {notice && (
+        <p className="success" role="status">
+          <Check size={18} />
+          {notice}
+        </p>
+      )}
+      <ul className="onboarding-steps">
+        {onboardingSteps(profile).map((step) => (
+          <li key={step.label} className={step.done ? "done" : ""}>
+            {step.done ? (
+              <Check size={16} />
+            ) : (
+              <span className="step-dot" aria-hidden="true" />
+            )}
+            {step.label}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
 function ProfilePage() {
   const query = useData<Profile | null>("/profile");
+  const onboarding = query.isSuccess && onboardingLeft(query.data).length > 0;
+  const [editing, setEditing] = useState(false);
+  const [notice, setNotice] = useState("");
+  // 手機版的編輯按鈕在頁面底部，切換檢視／編輯時回到頂端。
+  const show = (edit: boolean, message = "") => {
+    setEditing(edit);
+    setNotice(message);
+    window.scrollTo({ top: 0 });
+  };
+  // 最後一項補齊的當下留在表單，才不會把還沒儲存的輸入丟掉。
+  // 用 effect 會先 render 出檢視模式、把表單卸載，所以在 render 當下就調整狀態。
+  const [wasOnboarding, setWasOnboarding] = useState(onboarding);
+  if (wasOnboarding !== onboarding) {
+    setWasOnboarding(onboarding);
+    if (!onboarding) {
+      setEditing(true);
+      setNotice("個人檔案完成了，現在可以開始探索。");
+    }
+  }
+  return (
+    <>
+      <Heading
+        overline="THIS IS ME"
+        title="個人檔案"
+        text="讓對的人，看見最真實的你。"
+      />
+      {onboarding ? (
+        <OnboardingPanel profile={query.data} notice={notice} />
+      ) : editing && notice ? (
+        <p className="panel success" role="status">
+          <Check size={18} />
+          {notice}
+        </p>
+      ) : null}
+      {query.isLoading ? (
+        <Loading />
+      ) : query.data && !editing && !onboarding ? (
+        <ProfileView
+          profile={query.data}
+          notice={notice}
+          onEdit={() => show(true)}
+        />
+      ) : (
+        <ProfileForm
+          profile={query.data ?? null}
+          loadError={query.error?.message}
+          onboarding={onboarding}
+          onSaved={(message) => show(false, message)}
+          onCancel={query.data && !onboarding ? () => show(false) : undefined}
+        />
+      )}
+    </>
+  );
+}
+function ProfileView({
+  profile: p,
+  notice,
+  onEdit,
+}: {
+  profile: Profile;
+  notice: string;
+  onEdit: () => void;
+}) {
+  const user = useAuth((s) => s.user)!;
+  const [preview, setPreview] = useState(false);
+  const person: Person = {
+    ...p,
+    age: ageOf(p.birthDate),
+    isVerified: user.isVerified,
+  };
+  const tags = p.traits ?? [];
+  const catalog = useTraitCatalog();
+  const lifePhotos = p.photos.slice(1);
+  const pills = (codes: string[]) => (
+    <div className="tags pills">
+      {codes.map((code) => (
+        <span key={code}>{traitLabel(code)}</span>
+      ))}
+    </div>
+  );
+  const actions = (
+    <div className="profile-actions">
+      <button type="button" className="button" onClick={onEdit}>
+        編輯個人檔案
+      </button>
+      <button
+        type="button"
+        className="button secondary preview-button"
+        onClick={() => setPreview(true)}
+      >
+        預覽公開頁面
+      </button>
+      <Link className="button secondary" href="/verification">
+        {user.isVerified ? "已通過真人驗證" : "前往真人驗證"}
+      </Link>
+    </div>
+  );
+  return (
+    <section className="profile-card">
+      {notice && (
+        <p className="success" role="status">
+          <Check size={18} />
+          {notice}
+        </p>
+      )}
+      <div className="profile-top">
+        <div className="profile-photo">
+          <Portrait person={p} large />
+        </div>
+        <div className="profile-summary">
+          <span className="eyebrow">MY PROFILE</span>
+          <h2>
+            {p.displayName}，{person.age}
+          </h2>
+          <p className="profile-city">{p.city}</p>
+          <p className="profile-tagline">
+            {[goalText(p.datingGoals), p.occupation]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+          {tags.length > 0 && <div className="summary-tags">{pills(tags)}</div>}
+          {actions}
+        </div>
+      </div>
+      <div className="profile-details">
+        <div className="profile-about">
+          <h3>關於我</h3>
+          <p>{p.bio || "還沒有寫下自我介紹。"}</p>
+        </div>
+        <div className="profile-loves">
+          <h3>我的小熱愛</h3>
+          {tags.length ? (
+            groupTraits(catalog, tags).map((group) => (
+              <div className="trait-group" key={group.category}>
+                {group.category && <h4>{categoryTitle(group.category)}</h4>}
+                {pills(group.codes)}
+              </div>
+            ))
+          ) : (
+            <p className="muted">還沒有選擇喜好。</p>
+          )}
+        </div>
+        <div className="profile-life">
+          <h3>我的生活照</h3>
+          {lifePhotos.length ? (
+            <div className="life-photos">
+              {lifePhotos.map((photo) => (
+                <img key={photo.id} src={photo.url} alt="我的生活照" />
+              ))}
+            </div>
+          ) : (
+            <p className="muted">加入更多照片，讓大家更認識你。</p>
+          )}
+        </div>
+      </div>
+      <div className="profile-actions-end">{actions}</div>
+      {preview && (
+        <PersonDialog person={person} onClose={() => setPreview(false)} />
+      )}
+    </section>
+  );
+}
+function ProfileForm({
+  profile,
+  loadError,
+  onboarding,
+  onSaved,
+  onCancel,
+}: {
+  profile: Profile | null;
+  loadError?: string;
+  onboarding: boolean;
+  onSaved: (message: string) => void;
+  onCancel?: () => void;
+}) {
   const client = useQueryClient();
-  const form = useForm<ProfileForm>({
+  const form = useForm({
     defaultValues: {
-      displayName: "",
-      birthDate: "",
-      gender: "woman",
-      bio: "",
-      city: "台北市",
-      datingIntent: "serious",
-      occupation: "",
-      education: "",
+      displayName: profile?.displayName ?? "",
+      birthDate: profile?.birthDate ?? "",
+      gender: profile?.gender ?? "woman",
+      bio: profile?.bio ?? "",
+      city: profile?.city ?? "台北市",
+      heightCm: profile?.heightCm ? String(profile.heightCm) : "",
+      occupation: profile?.occupation || "",
+      education: profile?.education || "",
     },
   });
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
   const [busy, setBusy] = useState(false);
-  const [tags, setTags] = useState<Tags>({
-    interests: [],
-    hobbies: [],
-    foods: [],
-  });
-  const interests = useData<string[]>("/interests"),
-    hobbies = useData<string[]>("/hobbies"),
-    foods = useData<string[]>("/foods");
-  // 表單上次同步的伺服器資料。重新取得資料（例如上傳照片後）時，只更新使用者之後沒改過的欄位，
-  // 避免清掉尚未儲存的輸入。
-  const synced = useRef<{ form: ProfileForm; tags: Tags } | null>(null);
-  useEffect(() => {
-    if (!query.data) return;
-    const next = { form: formOf(query.data), tags: tagsOf(query.data) };
-    const prev = synced.current;
-    synced.current = next;
-    if (!prev) {
-      form.reset(next.form);
-      setTags(next.tags);
-      return;
-    }
-    const current = form.getValues();
-    for (const key of profileFields)
-      if (current[key] === prev.form[key] && next.form[key] !== prev.form[key])
-        form.setValue(key, next.form[key]);
-    setTags((old) => {
-      const changed = tagGroups.filter(
-        (key) =>
-          sameTags(old[key], prev.tags[key]) &&
-          !sameTags(next.tags[key], prev.tags[key]),
-      );
-      if (!changed.length) return old;
-      const merged = { ...old };
-      for (const key of changed) merged[key] = next.tags[key];
-      return merged;
-    });
-  }, [query.data, form]);
+  const catalog = useTraitCatalog();
+  const [selected, setSelected] = useState<string[]>(profile?.traits ?? []);
+  const [goals, setGoals] = useState<string[]>(profile?.datingGoals ?? []);
+  const toggle = (
+    list: string[],
+    set: (next: string[]) => void,
+    code: string,
+  ) =>
+    set(list.includes(code) ? list.filter((c) => c !== code) : [...list, code]);
   // 從其他管道匯入的檔案可能使用清單外的城市，保留它原本的座標。
-  const saved = query.data;
   const cityOptions =
-    saved && !cities.some((c) => c.name === saved.city)
+    profile && !cities.some((c) => c.name === profile.city)
       ? [
           ...cities,
-          { name: saved.city, lat: saved.latitude, lng: saved.longitude },
+          { name: profile.city, lat: profile.latitude, lng: profile.longitude },
         ]
       : cities;
   const save = form.handleSubmit(async (values) => {
     setError("");
-    setSuccess("");
     const city = cityOptions.find((c) => c.name === values.city);
     if (!city) {
       setError("請選擇居住城市。");
       return;
     }
+    // 第一次建檔要把自我介紹與兩組選擇都填好，其他頁面才會解鎖。
+    if (onboarding) {
+      if (!values.bio.trim()) {
+        setError("請寫一段自我介紹。");
+        return;
+      }
+      if (!goals.length) {
+        setError("請選擇想遇見的關係。");
+        return;
+      }
+      if (!selected.length) {
+        setError("請至少選一個小熱愛。");
+        return;
+      }
+    }
     try {
       await send(
         "/profile",
-        { ...values, latitude: city.lat, longitude: city.lng, ...tags },
+        {
+          ...values,
+          heightCm: values.heightCm ? Number(values.heightCm) : null,
+          latitude: city.lat,
+          longitude: city.lng,
+          traits: selected,
+          datingGoals: goals,
+        },
         "PUT",
       );
-      // 剛送出的內容就是伺服器目前的資料；重新取得時只會多出伺服器端的整理（例如去除前後空白）。
-      synced.current = { form: values, tags };
       await client.invalidateQueries({ queryKey: ["/profile"] });
       await client.invalidateQueries({ queryKey: ["/discovery"] });
-      setSuccess("個人檔案已儲存，現在可以開始探索。");
+      onSaved(
+        onboarding
+          ? "個人檔案已儲存，接著加入一張生活照。"
+          : "個人檔案已儲存，現在可以開始探索。",
+      );
     } catch (e) {
       setError((e as Error).message);
     }
@@ -864,225 +1338,235 @@ function ProfilePage() {
     }
   }
   return (
-    <>
-      <Heading
-        overline="THIS IS YOUR STORY"
-        title="真實的你，最有魅力。"
-        text="一點生活、一點喜好，讓對的人更容易認識你。"
-      />
-      {query.isLoading ? (
-        <Loading />
-      ) : (
-        <div className="form-layout">
-          <section className="panel">
-            <form onSubmit={save}>
-              <div className="panel-title">
-                <UserRound size={20} />
-                <h2>關於我</h2>
-              </div>
-              <div className="form-grid">
-                <label>
-                  顯示名稱
-                  <input
-                    {...form.register("displayName")}
-                    maxLength={40}
-                    required
-                    placeholder="希望大家怎麼稱呼你？"
-                  />
-                </label>
-                <label>
-                  生日
-                  <input type="date" {...form.register("birthDate")} required />
-                  <small>須年滿 18 歲，只會公開年齡。</small>
-                </label>
-                <label>
-                  性別
-                  <select {...form.register("gender")}>
-                    {Object.entries(genderLabels)
-                      .filter(([k]) => k !== "any")
-                      .map(([k, v]) => (
-                        <option key={k} value={k}>
-                          {v}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <label>
-                  居住城市
-                  <select {...form.register("city")}>
-                    {cityOptions.map((c) => (
-                      <option key={c.name}>{c.name}</option>
-                    ))}
-                  </select>
-                  <small>使用城市中心估算距離，不公開精確位置。</small>
-                </label>
-                <label>
-                  想遇見的關係
-                  <select {...form.register("datingIntent")}>
-                    {Object.entries(intentLabels)
-                      .filter(([k]) => k !== "any")
-                      .map(([k, v]) => (
-                        <option key={k} value={k}>
-                          {v}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-                <label>
-                  職業（選填）
-                  <input {...form.register("occupation")} maxLength={80} />
-                </label>
-                <label className="span-two">
-                  自我介紹
-                  <textarea
-                    {...form.register("bio")}
-                    rows={4}
-                    maxLength={1000}
-                    placeholder="最近讓你開心的小事是什麼？"
-                  />
-                </label>
-              </div>
-              <div className="divider" />
-              <h3>那些讓你發光的小喜好</h3>
-              <p className="muted">選擇你喜歡的事，為對話留一個起點。</p>
-              {(
-                [
-                  { key: "interests", title: "興趣", values: interests.data },
-                  { key: "hobbies", title: "休閒活動", values: hobbies.data },
-                  { key: "foods", title: "喜愛的食物", values: foods.data },
-                ] as const
-              ).map((group) => (
-                <fieldset className="tag-field" key={group.key}>
-                  <legend>{group.title}</legend>
-                  <div className="tags selectable">
-                    {group.values?.map((tag) => (
-                      <button
-                        type="button"
-                        key={tag}
-                        aria-pressed={tags[group.key].includes(tag)}
-                        onClick={() =>
-                          setTags({
-                            ...tags,
-                            [group.key]: tags[group.key].includes(tag)
-                              ? tags[group.key].filter((t) => t !== tag)
-                              : [...tags[group.key], tag],
-                          })
-                        }
-                      >
-                        {tags[group.key].includes(tag) && <Check size={14} />}{" "}
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                </fieldset>
-              ))}
-              <ErrorText message={error || query.error?.message} />
-              {success && (
-                <p className="success" role="status">
-                  <Check size={18} />
-                  {success}
-                </p>
-              )}
-              <button className="button" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? "儲存中…" : "儲存個人檔案"}
-                <Check size={17} />
-              </button>
-            </form>
-          </section>
-          <aside>
-            <section className="panel photos-panel">
-              <h2>你的生活切片</h2>
-              <p className="muted">
-                {query.data
-                  ? "第一張照片會成為你的主照片。最多 6 張，每張 8 MB。"
-                  : "先儲存「關於我」，就能加入照片。"}
-              </p>
-              <div className="photo-grid">
-                {query.data?.photos.map((photo) => (
-                  <div className="photo-tile" key={photo.id}>
-                    <img src={photo.url} alt="我的照片" />
-                    <button
-                      className="photo-delete"
-                      aria-label="刪除照片"
-                      onClick={async () => {
-                        if (!window.confirm("確定刪除這張照片？")) return;
-                        try {
-                          await api(`/profile/photos/${photo.id}`, {
-                            method: "DELETE",
-                          });
-                          await client.invalidateQueries({
-                            queryKey: ["/profile"],
-                          });
-                        } catch (e) {
-                          setError((e as Error).message);
-                        }
-                      }}
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
+    <div className="form-layout">
+      <section className="panel">
+        <form onSubmit={save}>
+          <div className="panel-title">
+            <span className="eyebrow">
+              {profile ? "EDIT PROFILE" : "CREATE PROFILE"}
+            </span>
+            <h2>{profile ? "編輯個人檔案" : "建立你的個人檔案"}</h2>
+          </div>
+          <div className="form-grid">
+            <label>
+              顯示名稱
+              <input
+                {...form.register("displayName")}
+                maxLength={40}
+                required
+                placeholder="希望大家怎麼稱呼你？"
+              />
+            </label>
+            <label>
+              生日
+              <input type="date" {...form.register("birthDate")} required />
+              <small>須年滿 18 歲，只會公開年齡。</small>
+            </label>
+            <label>
+              性別
+              <select {...form.register("gender")}>
+                {Object.entries(genderLabels)
+                  .filter(([k]) => k !== "any")
+                  .map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              居住城市
+              <select {...form.register("city")}>
+                {cityOptions.map((c) => (
+                  <option key={c.name}>{c.name}</option>
                 ))}
-                {(query.data?.photos.length || 0) < 6 && (
-                  <label
-                    className={
-                      query.data ? "photo-upload" : "photo-upload disabled"
-                    }
-                  >
-                    <Camera size={23} />
-                    <span>
-                      {busy
-                        ? "上傳中…"
-                        : query.data
-                          ? "加入照片"
-                          : "先儲存檔案"}
-                    </span>
-                    <input
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      disabled={busy || !query.data}
-                      onChange={(e) => {
-                        void upload(e.target.files?.[0]);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
-                )}
+              </select>
+              <small>使用城市中心估算距離，不公開精確位置。</small>
+            </label>
+            <label>
+              身高（選填）
+              <input
+                type="number"
+                inputMode="numeric"
+                min={100}
+                max={250}
+                placeholder="公分"
+                {...form.register("heightCm")}
+              />
+              <small>填了才會出現在別人的身高篩選結果裡。</small>
+            </label>
+            <label>
+              職業（選填）
+              <input {...form.register("occupation")} maxLength={80} />
+            </label>
+            <label>
+              學歷（選填）
+              <input {...form.register("education")} maxLength={80} />
+            </label>
+            <label className="span-two">
+              自我介紹
+              <textarea
+                {...form.register("bio")}
+                rows={4}
+                maxLength={1000}
+                placeholder="最近讓你開心的小事是什麼？"
+              />
+            </label>
+          </div>
+          <div className="divider" />
+          <h3>想遇見的關係</h3>
+          <p className="muted">最多選 {datingGoalLimit} 項。</p>
+          <div className="tags selectable">
+            {traitsOf(catalog, "dating_goal").map((goal) => {
+              const on = goals.includes(goal.code);
+              return (
+                <button
+                  type="button"
+                  key={goal.code}
+                  aria-pressed={on}
+                  disabled={!on && goals.length >= datingGoalLimit}
+                  onClick={() => toggle(goals, setGoals, goal.code)}
+                >
+                  {on && <Check size={14} />} {goal.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="divider" />
+          <h3>我的小熱愛</h3>
+          <p className="muted">選擇你喜歡的事，為對話留一個起點。</p>
+          {traitCategories(catalog).map((category) => (
+            <fieldset className="tag-field" key={category}>
+              <legend>{categoryTitle(category)}</legend>
+              <div className="tags selectable">
+                {traitsOf(catalog, category).map((trait) => {
+                  const on = selected.includes(trait.code);
+                  return (
+                    <button
+                      type="button"
+                      key={trait.code}
+                      aria-pressed={on}
+                      onClick={() => toggle(selected, setSelected, trait.code)}
+                    >
+                      {on && <Check size={14} />} {trait.label}
+                    </button>
+                  );
+                })}
               </div>
-            </section>
-            <section className="note-card compact">
-              <ShieldCheck />
-              <h3>讓真實，多一份安心。</h3>
-              <p>查看你的驗證狀態。只有完成真人驗證，才會顯示驗證標記。</p>
-              <Link href="/verification" className="text-link">
-                查看真人驗證
-                <ArrowRight size={16} />
-              </Link>
-            </section>
-          </aside>
-        </div>
-      )}
-    </>
+            </fieldset>
+          ))}
+          <ErrorText message={error || loadError} />
+          <div className="form-actions">
+            <button className="button" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting ? "儲存中…" : "儲存個人檔案"}
+              <Check size={17} />
+            </button>
+            {onCancel && (
+              <button
+                type="button"
+                className="button secondary"
+                onClick={onCancel}
+              >
+                取消
+              </button>
+            )}
+          </div>
+        </form>
+      </section>
+      <aside>
+        <section className="panel photos-panel">
+          <h2>我的生活照</h2>
+          <p className="muted">
+            {profile
+              ? "第一張照片會成為你的主照片。最多 6 張，每張 8 MB。"
+              : "先儲存「關於我」，就能加入照片。"}
+          </p>
+          <div className="photo-grid">
+            {profile?.photos.map((photo) => (
+              <div className="photo-tile" key={photo.id}>
+                <img src={photo.url} alt="我的照片" />
+                <button
+                  type="button"
+                  className="photo-delete"
+                  aria-label="刪除照片"
+                  onClick={async () => {
+                    if (!window.confirm("確定刪除這張照片？")) return;
+                    try {
+                      await api(`/profile/photos/${photo.id}`, {
+                        method: "DELETE",
+                      });
+                      await client.invalidateQueries({
+                        queryKey: ["/profile"],
+                      });
+                    } catch (e) {
+                      setError((e as Error).message);
+                    }
+                  }}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+            {(profile?.photos.length || 0) < 6 && (
+              <label
+                className={profile ? "photo-upload" : "photo-upload disabled"}
+              >
+                <Camera size={23} />
+                <span>
+                  {busy ? "上傳中…" : profile ? "加入照片" : "先儲存檔案"}
+                </span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  disabled={busy || !profile}
+                  onChange={(e) => {
+                    void upload(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </label>
+            )}
+          </div>
+        </section>
+        <section className="panel compact">
+          <ShieldCheck />
+          <h3>讓真實，多一份安心。</h3>
+          <p className="muted">
+            查看你的驗證狀態。只有完成真人驗證，才會顯示驗證標記。
+          </p>
+          <Link href="/verification" className="text-link">
+            查看真人驗證
+            <ArrowRight size={16} />
+          </Link>
+        </section>
+      </aside>
+    </div>
   );
 }
 function PreferencesPage() {
   const query = useData<Preferences>("/preferences");
+  const catalog = useTraitCatalog();
   const blocks =
     useData<{ blockedUserId: string; displayName: string }[]>("/blocks");
   const client = useQueryClient();
-  // 年齡欄位保留使用者輸入的文字，送出時才轉數字；受控的數字欄位若存成 number，清空時會被補成 0。
-  const [values, setValues] = useState<
-    Omit<Preferences, "minAge" | "maxAge"> & { minAge: string; maxAge: string }
-  >({
-    minAge: "18",
-    maxAge: "99",
+  const [values, setValues] = useState<Preferences>({
+    minAge: 18,
+    maxAge: 99,
     preferredGender: "any",
     maxDistanceKm: 100,
+    minHeightCm: 130,
+    maxHeightCm: 250,
     preferredDatingIntent: "any",
   });
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  // 兩支拉桿代表同一個範圍，拖過頭時另一支跟著移動，範圍才不會反過來。
+  const setAges = (minAge: number, maxAge: number) =>
+    setValues((v) => ({ ...v, minAge, maxAge }));
+  const setHeights = (minHeightCm: number, maxHeightCm: number) =>
+    setValues((v) => ({ ...v, minHeightCm, maxHeightCm }));
   useEffect(() => {
     if (query.data) {
       const {
@@ -1090,13 +1574,17 @@ function PreferencesPage() {
         maxAge,
         preferredGender,
         maxDistanceKm,
+        minHeightCm,
+        maxHeightCm,
         preferredDatingIntent,
       } = query.data;
       setValues({
-        minAge: String(minAge),
-        maxAge: String(maxAge),
+        minAge,
+        maxAge,
         preferredGender,
         maxDistanceKm,
+        minHeightCm,
+        maxHeightCm,
         preferredDatingIntent,
       });
       setLoaded(true);
@@ -1112,8 +1600,8 @@ function PreferencesPage() {
     <>
       <Heading
         overline="FIND YOUR OWN RHYTHM"
-        title="你的期待，值得被理解。"
-        text="探索會同時考量你與對方的偏好。"
+        title="探索偏好"
+        text="你的期待，值得被理解。探索會同時考量你與對方的偏好。"
       />
       <section className="panel narrow">
         <form
@@ -1123,15 +1611,7 @@ function PreferencesPage() {
             setError("");
             setSaved(false);
             try {
-              await send(
-                "/preferences",
-                {
-                  ...values,
-                  minAge: Number(values.minAge),
-                  maxAge: Number(values.maxAge),
-                },
-                "PUT",
-              );
+              await send("/preferences", values, "PUT");
               await client.invalidateQueries({ queryKey: ["/preferences"] });
               await client.invalidateQueries({ queryKey: ["/discovery"] });
               setSaved(true);
@@ -1144,31 +1624,70 @@ function PreferencesPage() {
         >
           <h2>我希望認識的人</h2>
           <div className="form-grid">
-            <label>
-              最小年齡
-              <input
-                type="number"
-                min={18}
-                max={99}
-                required
-                value={values.minAge}
-                onChange={(e) =>
-                  setValues({ ...values, minAge: e.target.value })
-                }
-              />
+            <label className="span-two">
+              年齡範圍：{values.minAge}–{values.maxAge} 歲
+              <div
+                className="range-pair"
+                style={rangeStyle(ageRange, values.minAge, values.maxAge)}
+              >
+                <input
+                  type="range"
+                  aria-label="最小年齡"
+                  min={ageRange[0]}
+                  max={ageRange[1]}
+                  value={values.minAge}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setAges(next, Math.max(values.maxAge, next));
+                  }}
+                />
+                <input
+                  type="range"
+                  aria-label="最大年齡"
+                  min={ageRange[0]}
+                  max={ageRange[1]}
+                  value={values.maxAge}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setAges(Math.min(values.minAge, next), next);
+                  }}
+                />
+              </div>
             </label>
-            <label>
-              最大年齡
-              <input
-                type="number"
-                min={values.minAge || 18}
-                max={99}
-                required
-                value={values.maxAge}
-                onChange={(e) =>
-                  setValues({ ...values, maxAge: e.target.value })
-                }
-              />
+            <label className="span-two">
+              身高範圍：{values.minHeightCm}–{values.maxHeightCm} 公分
+              <div
+                className="range-pair"
+                style={rangeStyle(
+                  heightRange,
+                  values.minHeightCm,
+                  values.maxHeightCm,
+                )}
+              >
+                <input
+                  type="range"
+                  aria-label="最低身高"
+                  min={heightRange[0]}
+                  max={heightRange[1]}
+                  value={values.minHeightCm}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setHeights(next, Math.max(values.maxHeightCm, next));
+                  }}
+                />
+                <input
+                  type="range"
+                  aria-label="最高身高"
+                  min={heightRange[0]}
+                  max={heightRange[1]}
+                  value={values.maxHeightCm}
+                  onChange={(e) => {
+                    const next = Number(e.target.value);
+                    setHeights(Math.min(values.minHeightCm, next), next);
+                  }}
+                />
+              </div>
+              <small>沒有填身高的人仍會出現。</small>
             </label>
             <label>
               性別偏好
@@ -1196,9 +1715,10 @@ function PreferencesPage() {
                   })
                 }
               >
-                {Object.entries(intentLabels).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
+                <option value="any">都可以</option>
+                {traitsOf(catalog, "dating_goal").map((goal) => (
+                  <option key={goal.code} value={goal.code}>
+                    {goal.label}
                   </option>
                 ))}
               </select>
@@ -1207,9 +1727,15 @@ function PreferencesPage() {
               探索距離：{values.maxDistanceKm} 公里
               <input
                 type="range"
-                min={1}
-                max={2000}
-                value={Math.min(values.maxDistanceKm, 2000)}
+                className="range-single"
+                style={rangeStyle(
+                  distanceRange,
+                  distanceRange[0],
+                  Math.min(values.maxDistanceKm, distanceRange[1]),
+                )}
+                min={distanceRange[0]}
+                max={distanceRange[1]}
+                value={Math.min(values.maxDistanceKm, distanceRange[1])}
                 onChange={(e) =>
                   setValues({
                     ...values,
@@ -1285,8 +1811,8 @@ function VerificationPage() {
     <>
       <Heading
         overline="TRUST STARTS WITH HONESTY"
-        title="多一點真實，多一份安心。"
-        text="真人驗證包含身分比對與活體判斷。上傳照片本身不代表通過驗證。"
+        title="真人驗證"
+        text="多一點真實，多一份安心。真人驗證包含身分比對與活體判斷，上傳照片本身不代表通過驗證。"
       />
       <section className="panel narrow">
         <div className="verification-status">
@@ -1312,10 +1838,6 @@ function VerificationPage() {
           onSubmit={async (e) => {
             e.preventDefault();
             if (!file) return;
-            if (file.size > photoLimit) {
-              setError(photoTooLarge);
-              return;
-            }
             setBusy(true);
             setError("");
             try {
@@ -1340,7 +1862,17 @@ function VerificationPage() {
               required
               type="file"
               accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              onChange={(e) => {
+                const picked = e.target.files?.[0] || null;
+                if (picked && picked.size > photoLimit) {
+                  setError(photoTooLarge);
+                  setFile(null);
+                  e.target.value = "";
+                  return;
+                }
+                setError("");
+                setFile(picked);
+              }}
             />
             <small>JPEG、PNG、WebP，最大 8 MB；不會顯示在公開檔案。</small>
           </label>
@@ -1368,10 +1900,19 @@ function MatchesPage() {
   return (
     <>
       <Heading
-        overline="A MUTUAL LITTLE SPARK"
-        title="剛好，你們也喜歡彼此。"
-        text="一句簡單的你好，可能是一段好故事的開始。"
-      />
+        overline="BETTER TOGETHER"
+        title="我的配對"
+        text="相互喜歡，是故事的第一頁。"
+      >
+        {!!q.data?.length && (
+          <div className="section-bar">
+            <h2>{q.data.length} 位共同喜歡的你</h2>
+            <Link className="button secondary" href="/preferences">
+              探索偏好
+            </Link>
+          </div>
+        )}
+      </Heading>
       <ErrorText message={error || q.error?.message} />
       {q.isLoading ? (
         <Loading />
@@ -1384,63 +1925,80 @@ function MatchesPage() {
         />
       ) : (
         <div className="match-grid">
-          {q.data.map((m) => (
-            <article className="match-card" key={m.id}>
-              <Portrait person={m.otherUser} large />
-              <div className="match-copy">
-                <h2>
-                  {m.otherUser.displayName} <span>{m.otherUser.age}</span>
-                </h2>
-                <p>
-                  <MapPin size={14} />
-                  {m.otherUser.city} · {intentLabels[m.otherUser.datingIntent]}
-                </p>
-                <div className="tags">
-                  {m.otherUser.interests.slice(0, 3).map((t) => (
-                    <span key={t}>{t}</span>
-                  ))}
+          {q.data.map((m) => {
+            const fresh = matchedLabel(m.createdAt);
+            return (
+              <article
+                className={fresh ? "match-card fresh" : "match-card"}
+                key={m.id}
+              >
+                <Portrait person={m.otherUser} large />
+                <div className="match-copy">
+                  {fresh && (
+                    <p className="match-flag">
+                      <span className="badge">新配對</span>
+                      {fresh}
+                    </p>
+                  )}
+                  <h2>
+                    {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                  </h2>
+                  <p>
+                    {m.otherUser.bio ||
+                      [m.otherUser.city, goalText(m.otherUser.datingGoals)]
+                        .filter(Boolean)
+                        .join(" · ")}
+                  </p>
+                  <div className="match-actions">
+                    <Link
+                      className="button"
+                      href={`/messages/${m.conversationId}`}
+                    >
+                      開始聊天
+                    </Link>
+                    <div className="sub-actions">
+                      <button
+                        onClick={async () => {
+                          if (
+                            !window.confirm(
+                              "確定結束配對？這段對話將無法繼續。",
+                            )
+                          )
+                            return;
+                          try {
+                            await api(`/matches/${m.id}`, {
+                              method: "DELETE",
+                            });
+                            await client.invalidateQueries();
+                          } catch (e) {
+                            setError((e as Error).message);
+                          }
+                        }}
+                      >
+                        結束配對
+                      </button>
+                      <button
+                        onClick={async () => {
+                          if (!window.confirm("確定封鎖對方並結束配對？"))
+                            return;
+                          try {
+                            await send("/blocks", {
+                              blockedUserId: m.otherUser.userId,
+                            });
+                            await client.invalidateQueries();
+                          } catch (e) {
+                            setError((e as Error).message);
+                          }
+                        }}
+                      >
+                        封鎖
+                      </button>
+                    </div>
+                  </div>
                 </div>
-                <Link
-                  className="button full"
-                  href={`/messages/${m.conversationId}`}
-                >
-                  <MessageCircle size={18} />
-                  說聲你好
-                </Link>
-                <div className="sub-actions">
-                  <button
-                    onClick={async () => {
-                      if (!window.confirm("確定結束配對？這段對話將無法繼續。"))
-                        return;
-                      try {
-                        await api(`/matches/${m.id}`, { method: "DELETE" });
-                        await client.invalidateQueries();
-                      } catch (e) {
-                        setError((e as Error).message);
-                      }
-                    }}
-                  >
-                    結束配對
-                  </button>
-                  <button
-                    onClick={async () => {
-                      if (!window.confirm("確定封鎖對方並結束配對？")) return;
-                      try {
-                        await send("/blocks", {
-                          blockedUserId: m.otherUser.userId,
-                        });
-                        await client.invalidateQueries();
-                      } catch (e) {
-                        setError((e as Error).message);
-                      }
-                    }}
-                  >
-                    封鎖
-                  </button>
-                </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       )}
     </>
@@ -1448,13 +2006,15 @@ function MatchesPage() {
 }
 function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
   const q = useData<Conversation[]>("/conversations");
-  const selected = q.data?.find((c) => c.id === id);
+  const index = q.data?.findIndex((c) => c.id === id) ?? -1;
+  const selected = index >= 0 ? q.data?.[index] : undefined;
+  const unread = q.data?.reduce((sum, c) => sum + c.unreadCount, 0) || 0;
   return (
     <>
       <Heading
-        overline="EVERY CONVERSATION IS A BEGINNING"
-        title="好好說話，慢慢認識。"
-        text="真誠的好奇，是最好的開場。"
+        overline="LET'S TALK"
+        title="聊天室"
+        text="一句你好，也許就是故事的開始。"
       />
       <ErrorText message={q.error?.message} />
       {q.isLoading ? (
@@ -1477,29 +2037,43 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
           <div className={`chat-layout ${selected ? "has-selection" : ""}`}>
             <aside className="conversation-list">
               <div className="list-heading">
-                你的對話 <span>{q.data.length}</span>
+                <h2>最近對話</h2>
+                <p>{unread} 則未讀訊息</p>
               </div>
-              {q.data.map((c) => (
-                <Link
-                  href={`/messages/${c.id}`}
-                  className={
-                    id === c.id ? "conversation selected" : "conversation"
-                  }
-                  key={c.id}
-                >
-                  <Portrait person={c.otherUser} />
-                  <div>
-                    <b>{c.otherUser.displayName}</b>
-                    <p>{c.lastMessage?.content || "從一句你好開始吧。"}</p>
-                  </div>
-                  {c.unreadCount > 0 && (
-                    <span className="unread">{c.unreadCount}</span>
-                  )}
-                </Link>
-              ))}
+              <div className="conversation-items">
+                {q.data.map((c, i) => (
+                  <Link
+                    href={`/messages/${c.id}`}
+                    className={
+                      id === c.id ? "conversation selected" : "conversation"
+                    }
+                    key={c.id}
+                  >
+                    <Avatar name={c.otherUser.displayName} tone={i} />
+                    <div className="conversation-text">
+                      <div className="conversation-top">
+                        <b>{c.otherUser.displayName}</b>
+                        <time>{listTime(c.lastMessage?.createdAt)}</time>
+                      </div>
+                      <p>{c.lastMessage?.content || "從一句你好開始吧。"}</p>
+                    </div>
+                    {c.unreadCount > 0 && (
+                      <span className="unread">{c.unreadCount}</span>
+                    )}
+                  </Link>
+                ))}
+              </div>
+              <Link className="button secondary list-more" href="/matches">
+                查看所有配對
+              </Link>
             </aside>
             {selected ? (
-              <Chat key={selected.id} conversation={selected} socket={socket} />
+              <Chat
+                key={selected.id}
+                conversation={selected}
+                tone={index}
+                socket={socket}
+              />
             ) : (
               <div className="chat-placeholder">
                 <MessageCircle size={42} />
@@ -1514,9 +2088,11 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
 }
 function Chat({
   conversation: c,
+  tone,
   socket,
 }: {
   conversation: Conversation;
+  tone: number;
   socket: Socket | null;
 }) {
   const user = useAuth((s) => s.user)!;
@@ -1532,6 +2108,7 @@ function Chat({
   const [readAt, setReadAt] = useState(c.otherLastReadAt || "");
   const [closed, setClosed] = useState(false);
   const [hasOlder, setHasOlder] = useState(true);
+  const [showProfile, setShowProfile] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   const draft = useRef<{ content: string; clientId: string } | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1540,7 +2117,6 @@ function Chat({
     const saved = c.otherLastReadAt;
     if (saved) setReadAt((current) => (current > saved ? current : saved));
   }, [c.otherLastReadAt]);
-  // 與伺服器分頁相同的順序（時間，再比 id），最舊的一則才能當「載入較早訊息」的游標。
   const merge = (items: Message[]) =>
     setMessages((old) =>
       Array.from(
@@ -1677,15 +2253,20 @@ function Chat({
         >
           <ChevronLeft />
         </Link>
-        <Portrait person={c.otherUser} />
-        <div>
+        <Avatar name={c.otherUser.displayName} tone={tone} size="md" />
+        <div className="chat-title">
           <h2>{c.otherUser.displayName}</h2>
-          <small>{online ? "在線上" : "離線"}</small>
+          <small className={online ? "presence online" : "presence"}>
+            {online ? "在線中" : "離線"}
+          </small>
         </div>
-        <span className="chat-shield">
-          <ShieldCheck size={17} />
-          雙向配對
-        </span>
+        <button
+          type="button"
+          className="button secondary"
+          onClick={() => setShowProfile(true)}
+        >
+          查看檔案
+        </button>
       </header>
       <div className="message-scroll">
         {hasOlder && messages[0] && (
@@ -1711,46 +2292,58 @@ function Chat({
           <Loading />
         ) : messages.length === 0 ? (
           <div className="conversation-start">
-            <Heart size={25} />
+            <HeartIcon size={26} />
             <h3>你們的故事，從這裡開始。</h3>
             <p>「你最近最喜歡的一間咖啡店是哪間？」</p>
           </div>
         ) : (
-          messages.map((m) => (
-            <div
-              className={m.senderId === user.id ? "message own" : "message"}
-              key={m.id}
-            >
-              <div>{m.content}</div>
-              <small>
-                {new Date(m.createdAt).toLocaleTimeString("zh-TW", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-                {m.senderId === user.id && readAt >= m.createdAt && (
-                  <>
-                    <CheckCheck size={13} />
-                    已讀
-                  </>
+          messages.map((m, i) => {
+            const own = m.senderId === user.id;
+            const newDay =
+              i === 0 ||
+              daysAgo(messages[i - 1].createdAt) !== daysAgo(m.createdAt);
+            return (
+              <Fragment key={m.id}>
+                {newDay && (
+                  <p className="date-chip">
+                    <span>{dayLabel(m.createdAt)}</span>
+                  </p>
                 )}
-              </small>
-            </div>
-          ))
+                <div className={own ? "message own" : "message"}>
+                  {!own && (
+                    <Avatar
+                      name={c.otherUser.displayName}
+                      tone={tone}
+                      size="sm"
+                    />
+                  )}
+                  <div className="message-body">
+                    <div className="bubble">{m.content}</div>
+                    <small>
+                      {clock(m.createdAt)}
+                      {own && readAt >= m.createdAt && (
+                        <>
+                          <CheckCheck size={13} />
+                          已讀
+                        </>
+                      )}
+                    </small>
+                  </div>
+                </div>
+              </Fragment>
+            );
+          })
         )}
         <div ref={end} />
       </div>
-      <div className="typing-line" aria-live="polite">
-        {typing
-          ? "對方正在輸入…"
-          : closed
-            ? "這段對話已結束。"
-            : "留一點真誠，給每一句話。"}
-      </div>
       <ErrorText message={error || q.error?.message} />
       <form className="message-input" onSubmit={submit}>
+        <div className="typing-line" aria-live="polite">
+          {typing ? "對方正在輸入…" : closed ? "這段對話已結束。" : ""}
+        </div>
         <input
           aria-label="訊息內容"
-          placeholder="說聲你好，聊聊今天…"
+          placeholder="輸入訊息..."
           value={content}
           maxLength={2000}
           disabled={closed}
@@ -1770,9 +2363,15 @@ function Chat({
           aria-label="傳送訊息"
           disabled={busy || !content.trim() || closed}
         >
-          <Send size={19} />
+          傳送
         </button>
       </form>
+      {showProfile && (
+        <PersonDialog
+          person={c.otherUser}
+          onClose={() => setShowProfile(false)}
+        />
+      )}
     </section>
   );
 }
@@ -1793,8 +2392,8 @@ function NotificationsPage() {
     <>
       <Heading
         overline="LITTLE UPDATES, NEW POSSIBILITIES"
-        title="有人，正在靠近你的故事。"
-        text="在這裡查看新的配對與訊息。"
+        title="通知"
+        text="有人，正在靠近你的故事。在這裡查看新的配對與訊息。"
       />
       <ErrorText message={error || q.error?.message} />
       {q.isLoading ? (
@@ -1828,7 +2427,7 @@ function NotificationsPage() {
             >
               <span className="notification-icon">
                 {n.type === "match" ? (
-                  <Heart size={21} />
+                  <HeartIcon size={21} />
                 ) : (
                   <MessageCircle size={21} />
                 )}

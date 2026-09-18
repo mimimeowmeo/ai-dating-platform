@@ -11,7 +11,7 @@ import {
   pairLock,
   Infrastructure,
 } from "./core";
-import { Profiles, card, userInclude } from "./profiles";
+import { Profiles, card, traitCodes, userInclude } from "./profiles";
 const messageInput = z
   .object({
     content: z.string().trim().min(1).max(2000),
@@ -36,8 +36,12 @@ export class Social {
       ageAt(q.birthDate) >= p.minAge &&
       ageAt(q.birthDate) <= p.maxAge &&
       (p.preferredGender === "any" || p.preferredGender === q.gender) &&
+      // 關係期待改看 traits 的 dating_goal：偏好「都可以」，或對方的交友目標包含它。
       (p.preferredDatingIntent === "any" ||
-        p.preferredDatingIntent === q.datingIntent) &&
+        traitCodes(b, true).includes(p.preferredDatingIntent)) &&
+      // 沒填身高的人無從判斷，不因身高條件被排除。
+      (q.heightCm == null ||
+        (q.heightCm >= p.minHeightCm && q.heightCm <= p.maxHeightCm)) &&
       distance(a.profile, q) <= p.maxDistanceKm
     );
   }
@@ -61,13 +65,14 @@ export class Social {
         matchesB: { none: { userAId: id } },
       },
       include: userInclude,
-      orderBy: { createdAt: "desc" },
+      // 匯入資料的 createdAt 完全相同，加上 id 當第二排序鍵才有穩定順序。
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
       take: 500,
     });
     return users
       .filter((u) => this.eligible(me, u) && this.eligible(u, me))
       .slice(0, 30)
-      .map(card);
+      .map((u) => card(u, id));
   }
   async interact(id: string, body: unknown) {
     const dto = parse(
@@ -191,7 +196,7 @@ export class Social {
         result.push({
           id: m.id,
           createdAt: m.createdAt,
-          otherUser: card(other),
+          otherUser: card(other, id),
           conversationId: m.conversation?.id,
         });
     }
@@ -311,7 +316,7 @@ export class Social {
       out.push({
         id: c.id,
         matchId: c.matchId,
-        otherUser: card(other),
+        otherUser: card(other, id),
         lastMessage: c.messages[0] || null,
         otherLastReadAt:
           c.members.find((member) => member.userId === other.id)?.lastReadAt ??

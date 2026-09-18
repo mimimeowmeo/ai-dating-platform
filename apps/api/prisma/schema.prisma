@@ -19,6 +19,7 @@ model User {
   photos       Photo[]
   sessions     Session[]
   verifications Verification[]
+  traits UserTrait[]
   sentInteractions Interaction[] @relation("sent")
   receivedInteractions Interaction[] @relation("received")
   matchesA Match[] @relation("matchA")
@@ -45,6 +46,26 @@ model Session {
   @@map("sessions")
 }
 
+model Trait {
+  id Int @id @default(autoincrement())
+  category String
+  code String
+  labelZh String? @map("label_zh")
+  users UserTrait[]
+  @@unique([category, code])
+  @@map("traits")
+}
+
+model UserTrait {
+  userId String @map("user_id") @db.Uuid
+  traitId Int @map("trait_id")
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trait Trait @relation(fields: [traitId], references: [id], onDelete: Restrict)
+  @@id([userId, traitId])
+  @@index([traitId])
+  @@map("user_traits")
+}
+
 model Profile {
   userId String @id @map("user_id") @db.Uuid
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -55,7 +76,8 @@ model Profile {
   city String
   latitude Float
   longitude Float
-  datingIntent String @map("dating_intent")
+  // 舊欄位，已由 traits 的 dating_goal 取代；保留資料並給預設值，之後可移除。
+  datingIntent String @default("serious") @map("dating_intent")
   heightCm Int? @map("height_cm")
   occupation String?
   education String?
@@ -74,6 +96,8 @@ model Preference {
   maxAge Int @default(99) @map("max_age")
   preferredGender String @default("any") @map("preferred_gender")
   maxDistanceKm Int @default(100) @map("max_distance_km")
+  minHeightCm Int @default(130) @map("min_height_cm")
+  maxHeightCm Int @default(250) @map("max_height_cm")
   preferredDatingIntent String @default("any") @map("preferred_dating_intent")
   updatedAt DateTime @updatedAt @map("updated_at")
   @@map("preferences")

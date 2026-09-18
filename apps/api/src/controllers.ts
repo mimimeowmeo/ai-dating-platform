@@ -45,8 +45,13 @@ export class HealthController {
       return fail(503, "STORAGE_UNAVAILABLE", "儲存服務尚未就緒。");
     return { status: "ok", service: "dating-api" };
   }
-  @Get("media/:id") async media(@Param("id") id: string, @Res() res: Response) {
-    const stream = await this.profiles.media(id);
+  // 簽章本身就是授權：<img> 送不出 Authorization header，所以不掛 AuthGuard。
+  @Get("media/:id") async media(
+    @Param("id") id: string,
+    @Query() query: { u?: string; e?: string; s?: string },
+    @Res() res: Response,
+  ) {
+    const stream = await this.profiles.media(id, query);
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "private, max-age=300");
     stream.on("error", () => res.destroy());
@@ -89,6 +94,9 @@ export class ProductController {
   }
   @Put("preferences") savePrefs(@Req() r: AuthRequest, @Body() b: unknown) {
     return this.profiles.savePreferences(r.userId, b);
+  }
+  @Get("traits") traits() {
+    return this.profiles.traitCatalog();
   }
   @Get("interests") interests() {
     return catalogs.interests;

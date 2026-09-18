@@ -186,12 +186,15 @@ Target local environment:
 nginx
 web
 api
-ai
-ai-worker
-postgres
 redis
-minio
+heartlink-pg        # PostgreSQL 16 + pgvector (was: postgres)
+heartlink-minio     # object storage (was: minio)
 ```
+
+The `ai` / `ai-worker` services were removed: face verification was never wired to a real
+model, so they only idled. `POST /onboarding/selfie` now returns `status=unavailable` with
+`reasonCode=AI_SERVICE_UNAVAILABLE` via the existing fallback path. Source is kept under
+`services/ai/`; restore the service definitions in `docker-compose.yml` to bring them back.
 
 The first Docker milestone should be small and validated incrementally. Do not create all application containers in one giant change unless the current task explicitly asks for it.
 

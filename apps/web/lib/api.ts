@@ -19,6 +19,9 @@ export type Card = {
   foods: string[];
   photos: Photo[];
   isVerified: boolean;
+  // traits 資料表的 code：dating_goal 放 datingGoals，其餘類別放 traits。
+  traits: string[];
+  datingGoals: string[];
 };
 export type Profile = {
   userId: string;
@@ -37,12 +40,16 @@ export type Profile = {
   hobbies: string[];
   foods: string[];
   photos: Photo[];
+  traits: string[];
+  datingGoals: string[];
 };
 export type Preferences = {
   minAge: number;
   maxAge: number;
   preferredGender: string;
   maxDistanceKm: number;
+  minHeightCm: number;
+  maxHeightCm: number;
   preferredDatingIntent: string;
 };
 export type Message = {

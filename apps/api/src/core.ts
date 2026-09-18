@@ -58,6 +58,8 @@ const fieldLabels: Record<string, string> = {
   maxAge: "最大年齡",
   preferredGender: "性別偏好",
   maxDistanceKm: "探索距離",
+  minHeightCm: "最低身高",
+  maxHeightCm: "最高身高",
   preferredDatingIntent: "關係期待",
   targetUserId: "對象",
   action: "操作",

@@ -1,6 +1,29 @@
+# CI 專用：完全從零啟動，所有連線設定都吃 pnpm setup 產生的 .env，
+# 所以容器內與主機端（integration.test.mjs 用 PrismaClient 直連）看到的是同一組帳密與埠。
+#
+# 為什麼不用主 docker-compose.yml：它的資料庫與物件儲存定義在 docker-compose.override.yml，
+# 那個檔案不進版控，CI 上拿不到，api 會因為連不上資料庫而 unhealthy。
+#
+# 不含 ai / ai-worker（服務已移除，見 docker-compose.yml 的說明）。
+# 啟動：docker compose -f docker-compose.ci.yml up -d --build --wait
+
 services:
-  # 📘 舊的 dating-postgres 已於切換到 Heartlink PG 後移除；新 DB(heartlink-pg)定義在 docker-compose.override.yml。
-  # 📘 舊的 tools-adminer(:8081)一併移除，改用 heartlink-adminer(:8090，自動登入)。備份在 backups/dating-postgres-backup.sql。
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?請執行 pnpm setup}
+      POSTGRES_USER: ${POSTGRES_USER:?請執行 pnpm setup}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?請執行 pnpm setup}
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
   redis:
     image: redis:7.4-alpine
     restart: unless-stopped
@@ -19,11 +42,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-  # 📘 舊的 minio(dating-media)已移除；圖床改用 heartlink-minio(定義在 docker-compose.override.yml，bucket heartlink-media)。
-  # AI 服務（ai / ai-worker）已移除：真人驗證尚未接上實際模型，留著只是空轉。
-  # 移除後 POST /onboarding/selfie 會走既有的降級路徑，回 status=unavailable、
-  # reasonCode=AI_SERVICE_UNAVAILABLE（見 apps/api/src/profiles.ts 的 verifySelfie）。
-  # 原始碼保留在 services/ai/，要恢復就把這段服務定義加回來。
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?請執行 pnpm setup}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?請執行 pnpm setup}
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    volumes: ["minio_data:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
   api:
     build: { context: ., dockerfile: apps/api/Dockerfile }
     restart: unless-stopped
@@ -32,19 +64,21 @@ services:
       PORT: 3001
       DATABASE_URL: ${DOCKER_DATABASE_URL:?請執行 pnpm setup}
       REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://heartlink-minio:9000
+      S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET:-heartlink-media}
+      S3_BUCKET: ${S3_BUCKET:-dating-media}
       JWT_SECRET: ${JWT_SECRET:?請執行 pnpm setup}
-      # ai 服務已移除，這個位址一定連不上，verifySelfie 會走降級路徑。
-      AI_INTERNAL_URL: ${AI_INTERNAL_URL:-http://127.0.0.1:8000}
+      # ai 服務已移除；這裡只是讓啟動時的 env 驗證過關，實際不會連線。
+      AI_INTERNAL_URL: http://127.0.0.1:8000
       AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports: ["127.0.0.1:3001:3001"]
     depends_on:
+      postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
     healthcheck:
       test:
         [
@@ -91,4 +125,6 @@ services:
       timeout: 5s
       retries: 10
 volumes:
+  postgres_data:
   redis_data:
+  minio_data:
