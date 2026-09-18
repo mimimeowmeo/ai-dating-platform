@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import sharp, { type Metadata, type Sharp } from "sharp";
 import { z } from "zod";
 import {
@@ -43,7 +43,11 @@ const profileInput = z
     city: z.string().trim().min(1).max(80),
     latitude: z.number().min(-90).max(90),
     longitude: z.number().min(-180).max(180),
-    datingIntent: intent,
+    // traits 資料表的代碼：dating_goal 放 datingGoals，其餘類別放 traits。
+    traits: z.array(z.string().trim().min(1)).max(40).optional(),
+    datingGoals: z.array(z.string().trim().min(1)).max(2).optional(),
+    // 以下為舊欄位，仍接受（匯入資料與既有測試會送），但畫面已改用 traits。
+    datingIntent: intent.optional(),
     heightCm: z.number().int().min(100).max(250).nullable().optional(),
     occupation: z.string().max(80).nullable().optional(),
     education: z.string().max(80).nullable().optional(),
@@ -54,21 +58,45 @@ const profileInput = z
   .strict();
 const preferencesInput = z
   .object({
-    minAge: z.number().int().min(18).max(99),
-    maxAge: z.number().int().min(18).max(99),
+    minAge: z.number().int().min(18).max(130),
+    maxAge: z.number().int().min(18).max(130),
     preferredGender: z.enum(["woman", "man", "nonbinary", "any"]),
     maxDistanceKm: z.number().int().min(1).max(20000),
-    preferredDatingIntent: z.enum(["serious", "casual", "friendship", "any"]),
+    // 沒送就是拉桿的兩端（不限）；舊版前端與匯入腳本不會帶這兩個欄位。
+    minHeightCm: z.number().int().min(130).max(250).default(130),
+    maxHeightCm: z.number().int().min(130).max(250).default(250),
+    // "any" 或 traits 表裡 dating_goal 的代碼，實際值在 savePreferences 檢查。
+    preferredDatingIntent: z.string().trim().min(1),
   })
   .strict()
-  .refine((v) => v.minAge <= v.maxAge, "年齡下限不得大於上限");
-export const photoView = (p: any) => ({
-  id: p.id,
-  url: `/api/v1/media/${p.id}`,
-  isAvatar: p.isAvatar,
-  displayOrder: p.displayOrder,
-});
-export function card(user: any) {
+  .refine((v) => v.minAge <= v.maxAge, "年齡下限不得大於上限")
+  .refine((v) => v.minHeightCm <= v.maxHeightCm, "身高下限不得大於上限");
+// <img> 不會帶 Authorization header，所以照片網址改用短效簽章，並綁定觀看者。
+const MEDIA_WINDOW_MS = 6 * 60 * 60 * 1000;
+const mediaSignature = (photoId: string, viewerId: string, expires: number) =>
+  createHmac("sha256", config.JWT_SECRET)
+    .update(`${photoId}.${viewerId}.${expires}`)
+    .digest("hex")
+    .slice(0, 32);
+export const photoView = (p: any, viewerId: string) => {
+  // 對齊到固定時段，同一段時間內網址不變，瀏覽器才快取得住。
+  const expires =
+    Math.ceil((Date.now() + MEDIA_WINDOW_MS) / MEDIA_WINDOW_MS) *
+    MEDIA_WINDOW_MS;
+  const signature = mediaSignature(p.id, viewerId, expires);
+  return {
+    id: p.id,
+    url: `/api/v1/media/${p.id}?u=${viewerId}&e=${expires}&s=${signature}`,
+    isAvatar: p.isAvatar,
+    displayOrder: p.displayOrder,
+  };
+};
+// user_traits 讀出來的選擇，依類別拆成「交友目標」與「其他喜好」。
+export const traitCodes = (user: any, datingGoal: boolean) =>
+  (user?.traits || [])
+    .filter((t: any) => (t.trait.category === "dating_goal") === datingGoal)
+    .map((t: any) => t.trait.code);
+export function card(user: any, viewerId: string) {
   if (!user?.profile) return null;
   const p = user.profile;
   return {
@@ -82,8 +110,10 @@ export function card(user: any) {
     interests: p.interests,
     hobbies: p.hobbies,
     foods: p.foods,
-    photos: (user.photos || []).map(photoView),
+    photos: (user.photos || []).map((p: any) => photoView(p, viewerId)),
     isVerified: user.isVerified,
+    traits: traitCodes(user, false),
+    datingGoals: traitCodes(user, true),
   };
 }
 export const userInclude = {
@@ -91,6 +121,10 @@ export const userInclude = {
   preference: true,
   photos: {
     orderBy: [{ displayOrder: "asc" as const }, { createdAt: "asc" as const }],
+  },
+  traits: {
+    include: { trait: true },
+    orderBy: { traitId: "asc" as const },
   },
 };
 @Injectable()
@@ -108,19 +142,64 @@ export class Profiles {
       ? {
           ...user.profile,
           birthDate: user.profile.birthDate.toISOString().slice(0, 10),
-          photos: user.photos.map(photoView),
+          photos: user.photos.map((p: any) => photoView(p, id)),
+          traits: traitCodes(user, false),
+          datingGoals: traitCodes(user, true),
         }
       : null;
   }
   async save(id: string, body: unknown) {
-    const dto = parse(profileInput, body);
+    const { traits, datingGoals, ...dto } = parse(profileInput, body);
     const data = { ...dto, birthDate: new Date(dto.birthDate) };
-    await this.db.profile.upsert({
-      where: { userId: id },
-      create: { userId: id, ...data },
-      update: data,
+    const selected =
+      traits || datingGoals
+        ? await this.traitIds(traits ?? [], datingGoals ?? [])
+        : null;
+    await this.db.$transaction(async (tx) => {
+      await tx.profile.upsert({
+        where: { userId: id },
+        create: { userId: id, ...data },
+        update: data,
+      });
+      // 有送 traits 或 datingGoals 就整組換掉，沒送就保留原本的選擇。
+      if (selected) {
+        await tx.userTrait.deleteMany({ where: { userId: id } });
+        if (selected.length)
+          await tx.userTrait.createMany({
+            data: selected.map((traitId) => ({ userId: id, traitId })),
+          });
+      }
     });
     return this.mine(id);
+  }
+  // 只接受 traits 表裡的代碼，並確認類別放對位置。
+  private async traitIds(traits: string[], goals: string[]) {
+    const wanted = [...new Set([...traits, ...goals])];
+    const rows = wanted.length
+      ? await this.db.trait.findMany({ where: { code: { in: wanted } } })
+      : [];
+    const byCode = new Map(rows.map((t) => [t.code, t]));
+    const ids: number[] = [];
+    for (const [codes, datingGoal] of [
+      [traits, false],
+      [goals, true],
+    ] as const)
+      for (const code of new Set(codes)) {
+        const trait = byCode.get(code);
+        if (!trait || (trait.category === "dating_goal") !== datingGoal)
+          return fail(400, "INVALID_TRAIT", "請選擇清單中的選項。");
+        ids.push(trait.id);
+      }
+    return ids;
+  }
+  // 選項清單（畫面用來顯示標籤與可選項目）。
+  async traitCatalog() {
+    const rows = await this.db.trait.findMany({ orderBy: { id: "asc" } });
+    return rows.map((t) => ({
+      category: t.category,
+      code: t.code,
+      label: t.labelZh || t.code,
+    }));
   }
   async blocked(a: string, b: string) {
     return !!(await this.db.block.findFirst({
@@ -141,13 +220,19 @@ export class Profiles {
       include: userInclude,
     });
     if (!u?.profile) return fail(404, "NOT_FOUND", "找不到此個人檔案。");
-    return card(u);
+    return card(u, id);
   }
   async preferences(id: string) {
     return this.db.preference.findUniqueOrThrow({ where: { userId: id } });
   }
   async savePreferences(id: string, body: unknown) {
     const data = parse(preferencesInput, body);
+    if (data.preferredDatingIntent !== "any") {
+      const goal = await this.db.trait.findFirst({
+        where: { category: "dating_goal", code: data.preferredDatingIntent },
+      });
+      if (!goal) return fail(400, "INVALID_TRAIT", "請選擇清單中的關係期待。");
+    }
     return this.db.preference.upsert({
       where: { userId: id },
       create: { userId: id, ...data },
@@ -248,7 +333,7 @@ export class Profiles {
           },
         });
       });
-      return photoView(photo);
+      return photoView(photo, id);
     } catch (error) {
       await this.infra.storage.removeObject(config.S3_BUCKET, key);
       throw error;
@@ -278,10 +363,31 @@ export class Profiles {
     await this.infra.storage.removeObject(config.S3_BUCKET, photo.storageKey);
     return { ok: true };
   }
-  async media(photoId: string) {
+  async media(
+    photoId: string,
+    query: { u?: string; e?: string; s?: string } = {},
+  ) {
     uuid(photoId);
+    const viewerId = query.u ?? "";
+    const expires = Number(query.e);
+    const signature = query.s ?? "";
+    const expected = Number.isFinite(expires)
+      ? mediaSignature(photoId, viewerId, expires)
+      : "";
+    const matches =
+      expected.length > 0 &&
+      signature.length === expected.length &&
+      timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+    if (!matches || expires < Date.now())
+      return fail(403, "FORBIDDEN", "照片連結已失效，請重新整理頁面。");
     const photo = await this.db.photo.findUnique({ where: { id: photoId } });
     if (!photo) return fail(404, "NOT_FOUND", "找不到照片。");
+    // 封鎖之後就看不到對方的照片。
+    if (
+      photo.userId !== viewerId &&
+      (await this.blocked(viewerId, photo.userId))
+    )
+      return fail(404, "NOT_FOUND", "找不到照片。");
     return this.infra.storage.getObject(config.S3_BUCKET, photo.storageKey);
   }
   async verification(id: string) {

@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { io } from "socket.io-client";
 import sharp from "sharp";
-import { Queue, QueueEvents } from "bullmq";
 import { Client } from "minio";
 const base = process.env.TEST_API_URL || "http://127.0.0.1:3001/api/v1";
 const origin = new URL(base).origin;
@@ -306,7 +305,9 @@ test(
         })
       ).value;
       assert.equal(verification.status, "unavailable");
-      assert.equal(verification.reasonCode, "MODEL_NOT_CONFIGURED");
+      // ai 服務已移除，verifySelfie 連不上時走降級路徑。
+      // （ai 還在時這裡是 MODEL_NOT_CONFIGURED：服務有回應，但沒掛上真模型。）
+      assert.equal(verification.reasonCode, "AI_SERVICE_UNAVAILABLE");
       assert.equal(
         (await request("/auth/me", { user: a })).value.isVerified,
         false,
@@ -732,41 +733,65 @@ test(
     }
   },
 );
-test(
-  "Node BullMQ producer → Python worker 真實互通",
-  { timeout: 20000 },
-  async () => {
-    const u = new URL(process.env.REDIS_URL || "redis://127.0.0.1:6379");
-    const connection = { host: u.hostname, port: Number(u.port || 6379) };
-    const queue = new Queue("ai-verification", { connection });
-    const events = new QueueEvents("ai-verification", { connection });
-    let job;
-    try {
-      await events.waitUntilReady();
-      const image = await sharp({
-        create: { width: 128, height: 128, channels: 3, background: "#ccc" },
-      })
-        .jpeg()
-        .toBuffer();
-      job = await queue.add(
-        "verify",
-        {
-          imageBase64: image.toString("base64"),
-          mimeType: "image/jpeg",
-          requestId: randomUUID(),
-        },
-        { jobId: randomUUID(), attempts: 1 },
-      );
-      const result = await job.waitUntilFinished(events, 10000);
-      assert.equal(result.status, "unavailable");
-      assert.equal(result.reasonCode, "MODEL_NOT_CONFIGURED");
-      const stored = await queue.getJob(job.id);
-      assert.deepEqual(stored.data, { redacted: true });
-      assert.equal("livenessScore" in result, false);
-    } finally {
-      if (job) await job.remove().catch(() => {});
-      await events.close();
-      await queue.close();
-    }
-  },
-);
+// 原本這裡有一個「Node BullMQ producer → Python worker 真實互通」測試。
+// ai-worker 服務已移除（見 docker-compose.yml 的說明），佇列沒有消費者，
+// 這個測試必然逾時，因此一併移除。真人驗證改由 verifySelfie 的降級路徑覆蓋。
+test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 20000 }, async () => {
+  const origin = new URL(base).origin;
+  try {
+    const a = await create("照片甲");
+    const b = await create("照片乙");
+    const jpeg = await sharp({
+      create: { width: 128, height: 128, channels: 3, background: "#ccc" },
+    })
+      .jpeg()
+      .toBuffer();
+    const data = new FormData();
+    data.append("file", new Blob([jpeg], { type: "image/jpeg" }), "p.jpg");
+    const uploaded = await request("/profile/photos", {
+      method: "POST",
+      user: b,
+      body: data,
+      expected: 201,
+    });
+    assert.match(uploaded.value.url, /\?u=[0-9a-f-]+&e=\d+&s=[0-9a-f]{32}$/);
+    assert.equal(
+      (await fetch(`${origin}${uploaded.value.url}`)).status,
+      200,
+      "自己的簽章網址應該讀得到",
+    );
+    assert.equal(
+      (await fetch(`${base}/media/${uploaded.value.id}`)).status,
+      403,
+      "沒有簽章的舊網址應該被擋",
+    );
+    assert.equal(
+      (
+        await fetch(
+          `${origin}${uploaded.value.url.replace(/s=.{4}/, "s=dead")}`,
+        )
+      ).status,
+      403,
+      "簽章被竄改應該被擋",
+    );
+    const discovery = await request("/discovery", { user: a });
+    const card = discovery.value.find((c) => c.userId === b.id);
+    assert.ok(card?.photos?.[0]?.url, "探索卡片要帶出照片網址");
+    const seen = `${origin}${card.photos[0].url}`;
+    assert.equal((await fetch(seen)).status, 200);
+    await request("/blocks", {
+      method: "POST",
+      user: b,
+      body: { blockedUserId: a.id },
+      expected: 201,
+    });
+    assert.equal(
+      (await fetch(seen)).status,
+      404,
+      "被封鎖後原本的照片網址要失效",
+    );
+    console.log("已驗證：照片簽章、竄改與封鎖後的存取控制。");
+  } finally {
+    await cleanup();
+  }
+});

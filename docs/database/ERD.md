@@ -8,6 +8,7 @@ users
   +-- profiles
   +-- preferences
   +-- user_photos
+  +-- user_traits -- traits
   +-- user_interests -- interests
   +-- user_hobbies -- hobbies
   +-- user_foods -- foods
@@ -28,6 +29,7 @@ users
 ## Recommended tables
 
 ### users
+
 - id UUID PK
 - email unique
 - password_hash
@@ -38,6 +40,7 @@ users
 - deleted_at
 
 ### profiles
+
 - user_id UUID PK/FK
 - display_name
 - birth_date
@@ -54,15 +57,35 @@ users
 - updated_at
 
 ### preferences
+
 - user_id PK/FK
 - min_age
 - max_age
 - preferred_gender
 - max_distance_km
+- min_height_cm（預設 130）
+- max_height_cm（預設 250）
 - preferred_dating_intent
 - timestamps
 
+### traits
+
+- id SERIAL PK
+- category（personality／diet／value／lifestyle／interest／dating_goal）
+- code
+- label_zh
+- unique (category, code)
+
+### user_traits
+
+- user_id FK + trait_id FK 複合 PK
+- index (trait_id)
+- dating_goal 類別即「想遇見的關係」，其餘五類是「我的小熱愛」
+- profiles.dating_intent 與 preferences.preferred_dating_intent 為舊欄位，
+  preferred_dating_intent 現在存 `any` 或 dating_goal 的 code
+
 ### user_photos
+
 - id UUID PK
 - user_id FK
 - storage_key
@@ -74,6 +97,7 @@ users
 - deleted_at
 
 ### verification_records
+
 - id UUID PK
 - user_id FK
 - photo_id FK
@@ -86,6 +110,7 @@ users
 - created_at
 
 ### face_embeddings
+
 - id UUID PK
 - user_id FK
 - verification_id FK
@@ -95,6 +120,7 @@ users
 - created_at
 
 ### image_embeddings
+
 - id UUID PK
 - photo_id FK
 - embedding VECTOR(N)
@@ -103,6 +129,7 @@ users
 - created_at
 
 ### user_feature_vectors
+
 - user_id PK/FK
 - interest_embedding VECTOR(N)
 - hobby_embedding VECTOR(N)
@@ -116,6 +143,7 @@ users
 - updated_at
 
 ### user_clusters
+
 - id UUID PK
 - user_id FK
 - cluster_id
@@ -125,6 +153,7 @@ users
 - expires_at nullable
 
 ### likes
+
 - id UUID PK
 - from_user_id FK
 - to_user_id FK
@@ -132,6 +161,7 @@ users
 - created_at
 
 ### matches
+
 - id UUID PK
 - user_a_id FK
 - user_b_id FK
@@ -140,12 +170,14 @@ users
 - unmatched_at nullable
 
 ### conversations
+
 - id UUID PK
 - match_id FK
 - created_at
 - updated_at
 
 ### conversation_members
+
 - conversation_id FK
 - user_id FK
 - joined_at
@@ -153,6 +185,7 @@ users
 - composite PK
 
 ### messages
+
 - id UUID PK
 - conversation_id FK
 - sender_id FK
@@ -162,6 +195,7 @@ users
 - deleted_at nullable
 
 ### conversation_features
+
 - id UUID PK
 - conversation_id FK
 - user_id FK
@@ -174,6 +208,7 @@ users
 - created_at
 
 ### recommendation_events
+
 - id UUID PK
 - user_id FK
 - candidate_user_id FK
@@ -185,12 +220,14 @@ users
 - created_at
 
 ### blocks
+
 - id UUID PK
 - user_id FK
 - blocked_user_id FK
 - created_at
 
 ### notifications
+
 - id UUID PK
 - user_id FK
 - type

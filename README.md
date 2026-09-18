@@ -32,18 +32,23 @@ pnpm docker:up                    # 重新啟動／重建
 
 ## 服務
 
-| 服務 | 用途／位置 |
-| --- | --- |
-| nginx | 網站入口 http://localhost:8080 |
-| web | Next.js；容器內 3000 |
-| api | NestJS；http://127.0.0.1:3001/api/v1/health |
-| ai | FastAPI；http://127.0.0.1:8000/health |
-| ai-worker | Python BullMQ worker；queue `ai-verification` |
-| postgres | PostgreSQL 16 + pgvector；127.0.0.1:5432 |
-| redis | 工作佇列與 rate limit；127.0.0.1:6379 |
-| minio | 媒體儲存；9000，管理介面 http://localhost:9001 |
+| 服務              | 用途／位置                                     |
+| ----------------- | ---------------------------------------------- |
+| nginx             | 網站入口 http://localhost:8080                 |
+| web               | Next.js；容器內 3000                           |
+| api               | NestJS；http://127.0.0.1:3001/api/v1/health    |
+| redis             | 工作佇列與 rate limit；127.0.0.1:6379          |
+| heartlink-pg      | PostgreSQL 16 + pgvector；127.0.0.1:5433       |
+| heartlink-minio   | 媒體儲存；9002，管理介面 http://localhost:9003 |
+| heartlink-adminer | 資料庫管理介面 http://localhost:8090（自動登入）|
 
-MinIO 管理帳密來自本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`。所有主機埠只綁定 loopback。
+`heartlink-*` 三個服務定義在 `docker-compose.override.yml`，`docker compose up -d` 會一起帶起來。
+
+MinIO 管理帳密來自本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`。
+
+**AI 服務（ai／ai-worker）已移除**：真人驗證尚未接上實際模型，留著只是空轉。移除後
+`POST /onboarding/selfie` 會走降級路徑，回 `status=unavailable`、`reasonCode=AI_SERVICE_UNAVAILABLE`。
+原始碼保留在 `services/ai/`，要恢復就把 `docker-compose.yml` 裡的服務定義加回來。
 
 ## 資料庫管理與匯入
 
@@ -53,7 +58,7 @@ MinIO 管理帳密來自本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`。�
 pnpm db:admin
 ```
 
-開啟 [資料庫管理介面](http://localhost:8081)，選擇 **PostgreSQL**，伺服器填入 `postgres`；使用者、密碼與資料庫分別取自本機 `.env` 的 `POSTGRES_USER`、`POSTGRES_PASSWORD`、`POSTGRES_DB`。介面只綁定 `127.0.0.1`。
+開啟 [資料庫管理介面](http://localhost:8090)，`heartlink-adminer` 會自動帶入 `heartlink-pg` 的連線資訊，不需要手動填。
 
 - **SQL**：登入資料庫後，使用「匯入」（Import）上傳 SQL 檔。
 - **CSV**：進入目標資料表的瀏覽頁，使用「匯入」（Import）匯入欄位相符的 CSV。
@@ -68,7 +73,7 @@ pnpm db:admin
 ```sh
 pnpm install --frozen-lockfile
 docker compose stop nginx web api
-docker compose up -d --wait postgres redis minio ai ai-worker
+docker compose up -d --wait heartlink-pg heartlink-minio redis
 pnpm db:generate
 pnpm db:migrate
 pnpm dev
@@ -104,6 +109,15 @@ pnpm audit --prod --audit-level high
 
 `pnpm test` 使用真實本機 PostgreSQL／Redis／MinIO／API，並自動清除它建立的隨機帳號及照片；包含 Node → Python BullMQ 互通。`pnpm test:e2e` 建立桌面／手機測試帳號，執行後依本次隨機識別碼清理，保留其他帳號。
 
+整站驗收（每一支 API 對照資料表欄位、雙人聊天與配對、畫面互動、冗餘欄位報表）：
+
+```sh
+pnpm verify          # 跑完整套並自動清理測試帳號
+pnpm verify:report   # 只產生冗餘資料表／欄位報表（唯讀）
+```
+
+步驟與涵蓋範圍見 [驗收手冊](docs/testing/VERIFICATION.md)。
+
 AI 測試可在容器執行：
 
 ```sh
@@ -114,15 +128,15 @@ CI 定義於 `.github/workflows/ci.yml`。目前尚未初始化 Git 或連接 Gi
 
 ## 目前範圍
 
-| 階段 | 狀態 |
-| --- | --- |
-| Phase 1 基礎設施 | 8 個服務、持久化、健康檢查、pgvector、Nginx、Playwright 與 CI 定義 |
-| Phase 2 後端基礎 | NestJS、Prisma migration、設定驗證、錯誤處理、rate limit |
-| Phase 3 前端基礎 | 繁中 RWD、頁面與元件樣式、API client、登入保護 |
-| Phase 4 帳號與個人檔案 | 註冊／登入／refresh／登出、偏好、標籤、照片 |
-| Phase 5 真人驗證 | 影像檢查、私有服務、結果紀錄與 provider adapter；**真實模型／活體判斷／身分參照與政策待定** |
-| Phase 6 交友互動 | 雙向偏好篩選、like/pass、互讚配對、封鎖與取消配對 |
-| Phase 7 聊天 | 持久化訊息、Socket.IO、typing、presence、已讀、通知、重送去重 |
+| 階段                   | 狀態                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------- |
+| Phase 1 基礎設施       | 8 個服務、持久化、健康檢查、pgvector、Nginx、Playwright 與 CI 定義                          |
+| Phase 2 後端基礎       | NestJS、Prisma migration、設定驗證、錯誤處理、rate limit                                    |
+| Phase 3 前端基礎       | 繁中 RWD、頁面與元件樣式、API client、登入保護                                              |
+| Phase 4 帳號與個人檔案 | 註冊／登入／refresh／登出、偏好、標籤、照片                                                 |
+| Phase 5 真人驗證       | 影像檢查、私有服務、結果紀錄與 provider adapter；**真實模型／活體判斷／身分參照與政策待定** |
+| Phase 6 交友互動       | 雙向偏好篩選、like/pass、互讚配對、封鎖與取消配對                                           |
+| Phase 7 聊天           | 持久化訊息、Socket.IO、typing、presence、已讀、通知、重送去重                               |
 
 Phase 8–10 的推薦 AI、對話分析與持續學習尚未實作。Phase 1–7 的本機 MVP 未包含正式產品的電子郵件驗證、密碼重設、檢舉／內容審核、TLS、帳號刪除與隱私法遵驗收。
 
@@ -133,6 +147,7 @@ Phase 8–10 的推薦 AI、對話分析與持續學習尚未實作。Phase 1–
 - [原始專案報告](PROJECT_REPORT.md)：產品與技術方向。
 - [實作 API 契約](docs/implementation/PHASE-1-7-CONTRACT.md)：目前 HTTP、Socket 與資料格式。
 - [實作驗收紀錄](docs/implementation/ACCEPTANCE.md)：測試結果及未完成邊界。
+- [驗收手冊](docs/testing/VERIFICATION.md)：怎麼驗、驗了什麼，含 API ↔ 資料表、畫面 ↔ API 對照與冗餘欄位報表。
 - [架構](docs/architecture/ARCHITECTURE.md)／[ADR](docs/architecture/adr/0001-local-mvp-boundaries.md)：服務邊界與本機 MVP 的簡化。
 - [Prisma schema](apps/api/prisma/schema.prisma)：實際資料庫來源；[原始 ERD](docs/database/ERD.md) 保留作設計參考。
 - [AI 服務說明](services/ai/README.md)：provider 契約、環境設定與測試。
