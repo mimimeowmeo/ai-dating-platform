@@ -1,6 +1,6 @@
 """背景萃取：風格卡（POST /internal/ai/style-profile）與聊天室摘要（POST /internal/ai/conversation-summary）。
 
-兩者都用「萃取模型鏈」（預設自架 Ollama），不佔用 Gemini 的免費額度；
+兩者都用「萃取模型鏈」（預設 Ollama Cloud 的 gemma4:31b），不佔用 Gemini 的免費額度；
 風格卡的特徵句向量化則用 Gemini（所有向量必須同一個模型）。
 
 風格卡的作法（規格 5.3）：
