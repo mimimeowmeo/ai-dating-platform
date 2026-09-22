@@ -4,3 +4,6 @@
 !services/ai/requirements.txt
 !services/ai/app/
 !services/ai/app/*.py
+!services/ai/app/**/*.py
+**/__pycache__
+**/*.pyc

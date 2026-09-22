@@ -5,6 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
 
 from .config import Settings
+from .reply.api import install_reply_api
+from .reply.service import ReplyAIService, build_service
 from .schemas import MAX_BODY_BYTES, VerificationRequest, VerificationResult
 from .verification import InvalidImage, VerificationService
 
@@ -52,11 +54,20 @@ class InternalBoundary:
         await self.app(scope, bounded_receive, send)
 
 
-def create_app(settings: Settings | None = None, service: VerificationService | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    service: VerificationService | None = None,
+    reply_service: ReplyAIService | None = None,
+) -> FastAPI:
+    """建立 FastAPI app：真人驗證與 AI 推薦回覆共用同一個內部邊界（token 與大小限制）。
+
+    reply_service 讓測試可以注入使用假模型的服務；不給時依設定建立（模型延遲到第一次使用才建立）。
+    """
     settings = settings or Settings.from_env()
-    app = FastAPI(title="AI 私有驗證服務", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="AI 私有服務", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(InternalBoundary, settings=settings)
     verifier = service or VerificationService(settings)
+    replies = reply_service or build_service(settings)
 
     @app.exception_handler(RequestValidationError)
     async def request_error(_request, _error):
@@ -69,12 +80,19 @@ def create_app(settings: Settings | None = None, service: VerificationService | 
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "service": "ai", "verificationProvider": "configured" if settings.provider_configured else "unavailable"}
+        return {
+            "status": "ok",
+            "service": "ai",
+            "verificationProvider": "configured" if settings.provider_configured else "unavailable",
+            # 只回報「有沒有設定」，不實際呼叫模型；額度是否足夠要看 AI Studio。
+            "replySuggestions": replies.health(),
+        }
 
     @app.post("/internal/ai/face/verify", response_model=VerificationResult)
     async def verify(request: VerificationRequest):
         return await verifier.verify(request)
 
+    install_reply_api(app, replies)
     return app
 
 
