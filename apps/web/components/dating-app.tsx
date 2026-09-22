@@ -2337,7 +2337,8 @@ function Chat({
   }
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!content.trim() || busy || closed) return;
+    // 等待 AI 推薦時傳送鍵是停用的；按 Enter 也會走到這裡，所以要一起擋下。
+    if (!content.trim() || busy || suggesting || closed) return;
     setBusy(true);
     setError("");
     if (!draft.current || draft.current.content !== content.trim())
