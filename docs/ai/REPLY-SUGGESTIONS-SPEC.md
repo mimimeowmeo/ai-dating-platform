@@ -357,7 +357,7 @@ API 以 ts-node 跑在 3005，AI 服務與 worker 在本機。
   由 `--ai-ramp` 這個 CSS 變數在 1023px 斷點切換。
 - 邊框 1px → 3px：等待時把輸入框自己的邊框設成透明，由外圈的彩光當邊框。
 - 發光：同一組漸層再畫一層 `blur(11px)`，深色模式的透明度從 0.75 提高到 0.9。
-- 一圈 1.8 秒（`@keyframes ai-sweep` 轉 `--ai-angle`）；`prefers-reduced-motion` 時不旋轉，留下靜態彩邊。
+- 一圈 1.8 秒（`@keyframes ai-sweep` 把圓錐漸層轉 360°）；`prefers-reduced-motion` 時不旋轉，留下靜態彩邊。
 - 實作與設計稿相同（`apps/web/app/globals.css` 的 `.ai-ring`／`.ai-glow`／`.ai-fill`）：
   等待時在輸入框外殼裡疊三層——兩個裁切框各裝一個比框大的圓錐漸層在旋轉（`rotate` 動畫），
   再用一層不透明內底蓋住中央，看到的就只剩邊框那一圈彩光與外圈光暈。

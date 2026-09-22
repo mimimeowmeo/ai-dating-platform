@@ -338,13 +338,6 @@ export class Social {
     }
     return out;
   }
-  async activeConversationIds(id: string) {
-    const rows = await this.db.conversation.findMany({
-      where: { members: { some: { userId: id } }, match: { status: "active" } },
-      select: { id: true },
-    });
-    return rows.map((c) => c.id);
-  }
   /**
    * 這位使用者所有有效聊天室的對象（聊天室 id ＋ 對方的 id）。
    * 即時上線狀態要用：連線／斷線時要通知每一位對象，

@@ -1747,14 +1747,6 @@ input[type="range"] {
   font-size: 11px;
 }
 /* ── AI 推薦回覆（規格：docs/ai/REPLY-SUGGESTIONS-SPEC.md）───────────── */
-/* 跑光的角度做成可動畫的自訂屬性：瀏覽器會平滑補間這個角度，
-   不需要旋轉整個元素，也不會有裁切問題。不支援 @property 的舊瀏覽器
-   只會看到一圈不會轉的彩色邊框，功能不受影響。 */
-@property --ai-angle {
-  syntax: "<angle>";
-  inherits: false;
-  initial-value: 0deg;
-}
 :root {
   /* 桌面版用七彩，最像「AI 正在運算」。 */
   --ai-ramp: #ff5f8f, #ff9f45, #ffd447, #4fd39b, #3fb6ff, #7b7bff, #c46bff,
@@ -1765,7 +1757,7 @@ input[type="range"] {
 /* 輸入框外殼：長得就是原本那個輸入框（邊框、底色、圓角），
    真正的 <input> 與 AI 按鈕都是它裡面的一列，
    所以再長的文字也不會被按鈕蓋住（之前用 padding 讓位，長字仍會被壓到）。
-   彩光畫在這一層的偽元素上，外殼本身是不透明底色，中央被蓋住後只剩外圈一圈光。 */
+   等待 AI 時的跑光（.ai-glow／.ai-ring／.ai-fill）也疊在這一層裡，做法見下方。 */
 .ai-shell {
   position: relative;
   display: flex;
@@ -1799,7 +1791,6 @@ input[type="range"] {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
 }
-/* 等待 API 時：::after 是那圈彩光，::before 是同一組顏色模糊後的光暈。 */
 /* 等待 AI 回應時的跑光，做法與設計稿相同：
    .ai-ring 與 .ai-glow 是兩個裁切框，各自裝一個比框還大的圓錐漸層在旋轉；
    .ai-fill 是不透明的內底，蓋住中央之後，看到的就只剩邊框那一圈彩光與外圈光暈。 */
