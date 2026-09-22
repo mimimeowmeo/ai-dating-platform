@@ -1,11 +1,12 @@
 """用「真的模型」跑一次推薦回覆的主要流程，確認 Ollama／Gemini 真的接上了。
 
-這支腳本會實際呼叫模型（會花時間，Gemini 會用到額度），所以檔名刻意不以 test 開頭，
+這支腳本會實際呼叫模型（會花時間，也會用到 Ollama Cloud／Gemini 的額度），所以檔名刻意不以 test 開頭，
 `unittest discover` 不會自動執行它，只在手動確認時使用。
 
-執行（在 services/ai 目錄）：
-    OLLAMA_BASE_URL=http://localhost:11434/v1 .venv/bin/python -m tests.live_reply_smoke
-有設定 GEMINI_API_KEY 時，會另外用 Gemini 測試「產生推薦」與「向量化」；沒有就只測 Ollama。
+執行（在 services/ai 目錄；環境變數與專案根目錄的 .env 相同，例如 OLLAMA_BASE_URL、OLLAMA_API_KEY、GEMINI_API_KEY）：
+    .venv/bin/python -m tests.live_reply_smoke
+有 Ollama 設定時：測風格卡萃取、聊天室摘要，以及只用萃取模型產生推薦。
+有 GEMINI_API_KEY 時：再用預設的備援鏈（AI_REPLY_MODELS）產生推薦，並測 Gemini 向量化。
 """
 
 import asyncio
@@ -77,7 +78,7 @@ async def check_ollama(settings: Settings):
     print(f"耗時 {time.perf_counter() - started:.1f} 秒｜模型 {summary.modelName}")
     print(summary.summary)
 
-    section("Ollama 產生推薦（暫時把產生推薦也改用 Ollama）")
+    section(f"只用萃取模型產生推薦（{settings.extraction_models[0]}，不經備援鏈）")
     reply_settings = replace(settings, reply_models=settings.extraction_models, llm_timeout_seconds=300)
     await run_suggestions(ReplySuggester(reply_settings), card)
     return card
@@ -111,8 +112,8 @@ async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
 
 
 async def check_gemini(settings: Settings, partner_card) -> None:
-    """有 GEMINI_API_KEY 時：用 Gemini 產生推薦，並做一次向量化。"""
-    section(f"Gemini 產生推薦（{', '.join(settings.reply_models)}）")
+    """有 GEMINI_API_KEY 時：用預設的備援鏈產生推薦（Gemini 是備援），並用 Gemini 做一次向量化。"""
+    section(f"備援鏈產生推薦（{' → '.join(settings.reply_models)}）")
     await run_suggestions(ReplySuggester(settings), partner_card)
     section(f"Gemini 向量化（{settings.embedding_model}）")
     vectors = await Embedder(settings).embed(["你喜歡爬山嗎", "我家的貓很黏人"], "query")
@@ -129,12 +130,12 @@ async def main() -> None:
         except AIServiceError as error:
             print("Ollama 測試失敗：", error.code)
     else:
-        print("略過 Ollama：沒有設定 OLLAMA_BASE_URL")
+        print("略過 Ollama：沒有設定 OLLAMA_BASE_URL（Ollama Cloud 另外需要 OLLAMA_API_KEY）")
     if settings.gemini_configured:
         try:
             await check_gemini(settings, card)
         except AIServiceError as error:
-            print("Gemini 測試失敗：", error.code)
+            print("備援鏈／Gemini 向量化測試失敗：", error.code)
     else:
         print("略過 Gemini：沒有設定 GEMINI_API_KEY")
 
