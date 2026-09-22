@@ -64,7 +64,8 @@
 - `typing` `{conversationId,isTyping}`、`conversation:read` `{conversationId}`；server 發出 `message:new`、`typing`、`conversation:read`、`notification:new`、`presence`。
 - Socket 與 HTTP 皆須逐次檢查成員、配對有效與封鎖狀態；封鎖／取消配對後禁止既有連線收發。
 - 推播時只有連線的 access token 失效才中斷該連線（前端會換新 token 後重連）；無權存取某聊天室時只略過該事件。
-- `presence`：使用者第一條連線建立時，通知其所有有效聊天室「上線」；最後一條連線中斷 3 秒後仍未重連，才通知「離線」。前端只採用對方的 `presence` 與 `typing` 事件。
+- `presence`：使用者第一條連線建立時通知所有聊天對象「上線」；最後一條連線中斷 3 秒後仍未重連，才通知「離線」。事件發到每位對象自己的 `user:<id>` 房間（不是聊天室房間），所以對話列表不用先打開聊天室也收得到。前端只採用對方的 `presence` 與 `typing` 事件。
+- `presence:list` `{}` → ack `{ok, online: string[]}`：目前在線上的聊天對象 id。`presence` 只在狀態變化時才發，剛進頁面要先用這個拿快照。
 
 ## AI 推薦回覆
 

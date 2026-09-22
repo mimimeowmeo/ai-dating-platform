@@ -134,12 +134,19 @@ function Empty({
 function Portrait({
   person,
   large = false,
+  small = false,
 }: {
   person: { displayName: string; photos?: { url: string }[] };
   large?: boolean;
+  // small：聊天室訊息旁邊的小頭像（36px），沒有照片時退回顯示名字第一個字。
+  small?: boolean;
 }) {
   return (
-    <div className={large ? "portrait large" : "portrait"}>
+    <div
+      className={["portrait", large ? "large" : "", small ? "small" : ""]
+        .filter(Boolean)
+        .join(" ")}
+    >
       {person.photos?.[0] ? (
         <img src={person.photos[0].url} alt={`${person.displayName}的照片`} />
       ) : (
@@ -2010,6 +2017,35 @@ function MatchesPage() {
 }
 function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
   const q = useData<Conversation[]>("/conversations");
+  // 對話列表要顯示每個人的上線狀態：presence 事件只有狀態變化時才會來，
+  // 所以連上線時先跟伺服器要一份「現在誰在線上」的快照。
+  const [onlineIds, setOnlineIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!socket) return;
+    const snapshot = () =>
+      socket.emit(
+        "presence:list",
+        {},
+        (ack: { ok: boolean; online?: string[] }) => {
+          if (ack.ok && ack.online) setOnlineIds(ack.online);
+        },
+      );
+    const update = (d: { userId: string; online: boolean }) =>
+      setOnlineIds((ids) =>
+        d.online
+          ? ids.includes(d.userId)
+            ? ids
+            : [...ids, d.userId]
+          : ids.filter((userId) => userId !== d.userId),
+      );
+    snapshot();
+    socket.on("connect", snapshot);
+    socket.on("presence", update);
+    return () => {
+      socket.off("connect", snapshot);
+      socket.off("presence", update);
+    };
+  }, [socket]);
   const index = q.data?.findIndex((c) => c.id === id) ?? -1;
   const selected = index >= 0 ? q.data?.[index] : undefined;
   const unread = q.data?.reduce((sum, c) => sum + c.unreadCount, 0) || 0;
@@ -2053,17 +2089,26 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                     }
                     key={c.id}
                   >
-                    <Avatar name={c.otherUser.displayName} tone={i} />
+                    <span className="conversation-avatar">
+                      <Avatar name={c.otherUser.displayName} tone={i} />
+                      {/* 綠燈只在對方上線時出現。 */}
+                      {onlineIds.includes(c.otherUser.userId) && (
+                        <span className="online-dot" aria-label="上線中" />
+                      )}
+                    </span>
                     <div className="conversation-text">
                       <div className="conversation-top">
                         <b>{c.otherUser.displayName}</b>
-                        <time>{listTime(c.lastMessage?.createdAt)}</time>
                       </div>
                       <p>{c.lastMessage?.content || "從一句你好開始吧。"}</p>
                     </div>
-                    {c.unreadCount > 0 && (
-                      <span className="unread">{c.unreadCount}</span>
-                    )}
+                    {/* 時間與未讀數放同一欄並置中，右側才會對齊。 */}
+                    <div className="conversation-meta">
+                      <time>{listTime(c.lastMessage?.createdAt)}</time>
+                      {c.unreadCount > 0 && (
+                        <span className="unread">{c.unreadCount}</span>
+                      )}
+                    </div>
                   </Link>
                 ))}
               </div>
@@ -2072,12 +2117,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
               </Link>
             </aside>
             {selected ? (
-              <Chat
-                key={selected.id}
-                conversation={selected}
-                tone={index}
-                socket={socket}
-              />
+              <Chat key={selected.id} conversation={selected} socket={socket} />
             ) : (
               <div className="chat-placeholder">
                 <MessageCircle size={42} />
@@ -2092,11 +2132,9 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
 }
 function Chat({
   conversation: c,
-  tone,
   socket,
 }: {
   conversation: Conversation;
-  tone: number;
   socket: Socket | null;
 }) {
   const user = useAuth((s) => s.user)!;
@@ -2340,11 +2378,10 @@ function Chat({
         >
           <ChevronLeft />
         </Link>
-        <Avatar name={c.otherUser.displayName} tone={tone} size="md" />
         <div className="chat-title">
           <h2>{c.otherUser.displayName}</h2>
           <small className={online ? "presence online" : "presence"}>
-            {online ? "在線中" : "離線"}
+            {online ? "上線" : "離線"}
           </small>
         </div>
         <button
@@ -2397,22 +2434,17 @@ function Chat({
                   </p>
                 )}
                 <div className={own ? "message own" : "message"}>
-                  {!own && (
-                    <Avatar
-                      name={c.otherUser.displayName}
-                      tone={tone}
-                      size="sm"
-                    />
-                  )}
+                  {!own && <Portrait person={c.otherUser} small />}
                   <div className="message-body">
                     <div className="bubble">{m.content}</div>
                     <small>
                       {clock(m.createdAt)}
+                      {/* 勾勾與「已讀」包成一行，顯示在送出時間的下面。 */}
                       {own && readAt >= m.createdAt && (
-                        <>
+                        <span className="read-mark">
                           <CheckCheck size={13} />
                           已讀
-                        </>
+                        </span>
                       )}
                     </small>
                   </div>
@@ -2445,14 +2477,34 @@ function Chat({
           </div>
         )}
         <div className="composer-row">
-          {/* busy 時這層會畫出繞行的彩光，輸入框蓋在上面，只露出外圈。 */}
+          {/* 等待 AI 時多疊三層：光暈、彩光，以及蓋住中央的內底（做法同設計稿），
+              所以看到的是一圈沿著邊框順時針繞行的光。 */}
           <div className={suggesting ? "ai-shell busy" : "ai-shell"}>
+            {suggesting && (
+              <>
+                <span className="ai-glow" aria-hidden="true">
+                  <i />
+                </span>
+                <span className="ai-ring" aria-hidden="true">
+                  <i />
+                </span>
+                <span className="ai-fill" aria-hidden="true" />
+              </>
+            )}
             <input
               aria-label="訊息內容"
               placeholder="輸入訊息..."
               value={content}
               maxLength={2000}
               disabled={closed}
+              onKeyDown={(e) => {
+                // 按 Enter 直接送出。中文輸入法選字時的 Enter 是「確認選字」，
+                // 那時 isComposing 為 true，不能當成送出，否則會把半形的注音送出去。
+                if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing)
+                  return;
+                e.preventDefault();
+                void submit(e);
+              }}
               onChange={(e) => {
                 // 使用者自己打字就中斷打字動畫；清空輸入框等於放棄這則推薦。
                 stopTyping();

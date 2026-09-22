@@ -24,6 +24,8 @@
   --placeholder: #a59aa9;
   --focus: #eaa2c3;
   --track: #d3cad6;
+  /* 上線狀態的綠燈。 */
+  --online: #23a566;
   --portrait-a: #f4bcd5;
   --portrait-b: #cbb3e2;
   --error-bg: #fff0f4;
@@ -64,6 +66,8 @@
   --placeholder: #8a7d92;
   --focus: #e4749f;
   --track: #443b4f;
+  /* 深色底上要更亮一點才看得出來。 */
+  --online: #4ade80;
   --portrait-a: #71425c;
   --portrait-b: #4c3b6e;
   --error-bg: #3b1f27;
@@ -372,6 +376,11 @@ small {
 .portrait img {
   width: 100%;
   height: 100%;
+}
+.portrait.small {
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
 }
 .portrait.large {
   width: 100%;
@@ -1484,9 +1493,38 @@ input[type="range"] {
   border-color: var(--primary-soft);
   background: var(--primary-soft);
 }
+.conversation-avatar {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+/* 綠燈疊在頭像右下角，外圈用底色描一圈才不會跟頭像糊在一起。 */
+.online-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--online);
+}
+.conversation.selected .online-dot {
+  border-color: var(--primary-soft);
+}
 .conversation-text {
   flex: 1;
   min-width: 0;
+}
+/* 時間與未讀數上下排成一欄並置中，右側對齊才整齊。 */
+.conversation-meta {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 46px;
 }
 .conversation-top {
   display: flex;
@@ -1575,7 +1613,7 @@ input[type="range"] {
   background: var(--track);
 }
 .presence.online::before {
-  background: var(--primary);
+  background: var(--online);
 }
 .chat-header .button {
   flex-shrink: 0;
@@ -1634,14 +1672,25 @@ input[type="range"] {
 }
 .message small {
   display: flex;
-  /* 時間貼齊氣泡底線，長訊息換行時才不會飄到中間。 */
-  align-items: center;
+  /* 時間一行、已讀一行；整塊貼齊氣泡底線，長訊息換行時才不會飄到中間。 */
+  flex-direction: column;
+  align-items: flex-end;
   align-self: flex-end;
   flex-shrink: 0;
-  gap: 4px;
+  gap: 2px;
   padding-bottom: 2px;
   color: var(--muted);
   white-space: nowrap;
+}
+/* 對方的訊息時間在氣泡右邊，所以靠左對齊比較貼近氣泡。 */
+.message:not(.own) small {
+  align-items: flex-start;
+}
+/* 勾勾與「已讀」是同一行，放在時間底下。 */
+.read-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 /* 氣泡本身可以縮，時間永遠看得到。 */
 .message-body > .bubble {
@@ -1751,30 +1800,52 @@ input[type="range"] {
   outline-offset: 3px;
 }
 /* 等待 API 時：::after 是那圈彩光，::before 是同一組顏色模糊後的光暈。 */
-.ai-shell.busy::after,
-.ai-shell.busy::before {
-  content: "";
+/* 等待 AI 回應時的跑光，做法與設計稿相同：
+   .ai-ring 與 .ai-glow 是兩個裁切框，各自裝一個比框還大的圓錐漸層在旋轉；
+   .ai-fill 是不透明的內底，蓋住中央之後，看到的就只剩邊框那一圈彩光與外圈光暈。 */
+.ai-ring,
+.ai-glow {
   position: absolute;
-  inset: -3px;
+  overflow: hidden;
   border-radius: 17px;
-  background: conic-gradient(from var(--ai-angle), var(--ai-ramp));
-  animation: ai-sweep 1.8s linear infinite;
+  pointer-events: none;
 }
-.ai-shell.busy::before {
+.ai-ring {
+  inset: -3px;
+}
+.ai-glow {
   inset: -9px;
   border-radius: 23px;
   filter: blur(11px);
   opacity: var(--ai-glow);
 }
+.ai-ring i,
+.ai-glow i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: 230%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(from 0deg, var(--ai-ramp));
+  animation: ai-sweep 1.8s linear infinite;
+}
+.ai-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  pointer-events: none;
+}
 /* 「邊框變粗」的做法：等待時把外殼自己的 1px 邊框藏起來，
-   由外圈的彩光當邊框（inset -3px 剛好就是 3px 粗）。 */
+   由外圈那一圈彩光當邊框（inset -3px 剛好就是 3px 粗）。 */
 .ai-shell.busy {
   border-color: transparent;
-  background: var(--surface);
 }
 @keyframes ai-sweep {
   to {
-    --ai-angle: 360deg;
+    rotate: 360deg;
   }
 }
 /* 輸入框內的「AI 推薦」按鈕：外殼裡的最後一個元素，位置就在傳送鍵左邊。 */
@@ -1845,8 +1916,8 @@ input[type="range"] {
 }
 @media (prefers-reduced-motion: reduce) {
   /* 使用者要求減少動態時不轉圈，留下靜態彩邊當作等待中的提示。 */
-  .ai-shell.busy::after,
-  .ai-shell.busy::before {
+  .ai-ring i,
+  .ai-glow i {
     animation: none;
   }
 }
