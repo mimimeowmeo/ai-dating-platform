@@ -305,9 +305,15 @@ test(
         })
       ).value;
       assert.equal(verification.status, "unavailable");
-      // ai 服務已移除，verifySelfie 連不上時走降級路徑。
-      // （ai 還在時這裡是 MODEL_NOT_CONFIGURED：服務有回應，但沒掛上真模型。）
-      assert.equal(verification.reasonCode, "AI_SERVICE_UNAVAILABLE");
+      // 重點是「不會假造驗證通過」；兩種代碼都代表沒有真人辨識模型：
+      // AI_SERVICE_UNAVAILABLE＝連不上 ai 服務（CI 的 compose 不含它），
+      // MODEL_NOT_CONFIGURED＝ai 服務有回應，但沒掛上辨識模型（本機開著 ai 服務時）。
+      assert.ok(
+        ["AI_SERVICE_UNAVAILABLE", "MODEL_NOT_CONFIGURED"].includes(
+          verification.reasonCode,
+        ),
+        `未預期的代碼：${verification.reasonCode}`,
+      );
       assert.equal(
         (await request("/auth/me", { user: a })).value.isVerified,
         false,
@@ -795,3 +801,166 @@ test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 200
     await cleanup();
   }
 });
+test(
+  "AI 推薦回覆：權限、請求紀錄、訊息來源標記",
+  { timeout: 60000 },
+  async () => {
+    try {
+      const a = await create("AI甲"),
+        b = await create("AI乙"),
+        c = await create("AI丙");
+      for (const [from, to] of [
+        [a, b],
+        [b, a],
+      ])
+        await request("/interactions", {
+          method: "POST",
+          user: from,
+          body: { targetUserId: to.id, action: "like" },
+          expected: 201,
+        });
+      const conversationId = (await request("/conversations", { user: a }))
+        .value[0].id;
+      // 不是聊天室成員的人按推薦，連聊天室存在與否都不該知道。
+      await request(`/conversations/${conversationId}/reply-suggestions`, {
+        method: "POST",
+        user: c,
+        expected: 404,
+      });
+      await request(`/conversations/${conversationId}/messages`, {
+        method: "POST",
+        user: b,
+        body: { content: "嗨嗨，你週末都在做什麼？", clientId: randomUUID() },
+        expected: 201,
+      });
+      // AI 服務沒啟動時（CI 的 compose 不含 ai 服務）要回 503，而不是 500 或假資料。
+      const asked = await fetch(
+        `${base}/conversations/${conversationId}/reply-suggestions`,
+        { method: "POST", headers: { Authorization: `Bearer ${a.token}` } },
+      );
+      const suggested = await asked.json();
+      const requestRow = await db.aiSuggestionRequest.findFirst({
+        where: { conversationId, requesterId: a.id },
+        orderBy: { createdAt: "desc" },
+        include: { suggestions: true },
+      });
+      assert.ok(requestRow, "不論成功或失敗都要留下請求紀錄（規格 9）");
+      if (asked.status === 201) {
+        assert.ok(
+          suggested.suggestions.length >= 1 &&
+            suggested.suggestions.length <= 5,
+          "一次最多 5 則",
+        );
+        assert.equal(requestRow.status, suggested.status);
+        assert.ok(requestRow.modelName, "要記下實際回應的模型");
+        assert.equal(
+          requestRow.suggestions.filter((s) => s.rank > 0).length,
+          suggested.suggestions.length,
+          "回傳的推薦都要存檔",
+        );
+      } else {
+        assert.equal(asked.status, 503);
+        assert.ok(
+          ["AI_UNAVAILABLE", "AI_NOT_CONFIGURED"].includes(suggested.code),
+          `未預期的錯誤代碼：${suggested.code}`,
+        );
+        assert.equal(requestRow.status, "error");
+        assert.ok(requestRow.errorCode, "要記下失敗代碼");
+      }
+      // 以下的來源標記不依賴 AI 服務：直接放一則推薦進資料庫，模擬剛剛產生過。
+      const stored = await db.aiSuggestionRequest.create({
+        data: {
+          conversationId,
+          requesterId: a.id,
+          mode: "reply",
+          status: "ok",
+          suggestions: {
+            create: [
+              {
+                rank: 1,
+                text: "我週末通常會去爬山耶，妳呢",
+                intent: "answer",
+                styleTarget: "partner",
+                styleDistance: 0.12,
+              },
+            ],
+          },
+        },
+        include: { suggestions: true },
+      });
+      const suggestion = stored.suggestions[0];
+      const send = (user, content, suggestionId) =>
+        request(`/conversations/${conversationId}/messages`, {
+          method: "POST",
+          user,
+          body: { content, clientId: randomUUID(), ...(suggestionId ? { suggestionId } : {}) },
+          expected: 201,
+        });
+      const verbatim = await send(a, suggestion.text, suggestion.id);
+      const verbatimOrigin = await db.messageOrigin.findUnique({
+        where: { messageId: verbatim.value.id },
+      });
+      assert.equal(verbatimOrigin.origin, "ai_verbatim");
+      assert.equal(verbatimOrigin.similarity, 1);
+      assert.equal(
+        (await db.aiSuggestion.findUnique({ where: { id: suggestion.id } }))
+          .chosenAt instanceof Date,
+        true,
+        "被採用的推薦要記下時間，才能算採用率",
+      );
+      const edited = await send(a, `${suggestion.text}哈哈`, suggestion.id);
+      const editedOrigin = await db.messageOrigin.findUnique({
+        where: { messageId: edited.value.id },
+      });
+      assert.equal(editedOrigin.origin, "ai_edited");
+      assert.ok(
+        editedOrigin.similarity >= 0.5 && editedOrigin.similarity < 0.95,
+        `改寫後的相似度要落在 0.5～0.95：${editedOrigin.similarity}`,
+      );
+      const rewritten = await send(a, "我其實都在家裡耍廢", suggestion.id);
+      const rewrittenOrigin = await db.messageOrigin.findUnique({
+        where: { messageId: rewritten.value.id },
+      });
+      assert.equal(rewrittenOrigin.origin, "human", "改到看不出原樣就算真人寫的");
+      assert.equal(
+        rewrittenOrigin.suggestionId,
+        suggestion.id,
+        "仍保留出處，之後才能評估修改幅度",
+      );
+      // 不能拿別人的推薦替自己的訊息貼標籤。
+      await request(`/conversations/${conversationId}/messages`, {
+        method: "POST",
+        user: b,
+        body: {
+          content: "借用別人的推薦",
+          clientId: randomUUID(),
+          suggestionId: suggestion.id,
+        },
+        expected: 404,
+      });
+      await request(`/conversations/${conversationId}/messages`, {
+        method: "POST",
+        user: a,
+        body: {
+          content: "多帶一個欄位",
+          clientId: randomUUID(),
+          extraField: "nope",
+        },
+        expected: 400,
+      });
+      const plain = await send(b, "那下次一起去啊");
+      assert.equal(
+        await db.messageOrigin.findUnique({
+          where: { messageId: plain.value.id },
+        }),
+        null,
+        "一般訊息不寫來源紀錄，查詢時視為 human",
+      );
+      console.log(
+        `已驗證：推薦權限、請求紀錄（${asked.status === 201 ? "AI 服務可用" : "AI 服務不可用時回 503"}）、ai_verbatim／ai_edited／human 判定與越權保護。`,
+      );
+    } finally {
+      await cleanup();
+    }
+  },
+);

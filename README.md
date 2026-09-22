@@ -46,9 +46,11 @@ pnpm docker:up                    # 重新啟動／重建
 
 MinIO 管理帳密來自本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`。
 
-**AI 服務（ai／ai-worker）已移除**：真人驗證尚未接上實際模型，留著只是空轉。移除後
-`POST /onboarding/selfie` 會走降級路徑，回 `status=unavailable`、`reasonCode=AI_SERVICE_UNAVAILABLE`。
-原始碼保留在 `services/ai/`，要恢復就把 `docker-compose.yml` 裡的服務定義加回來。
+**AI 服務（ai／ai-worker）**：2026-09-23 為了「AI 推薦回覆」重新啟用。
+`ai` 提供 `/internal/ai/*` 給 NestJS 同步呼叫；`ai-worker` 消費 `ai-jobs` 佇列、把結果放進 `ai-results`，
+再由 NestJS 寫進資料庫（見 [ADR 0002](docs/architecture/adr/0002-db-ownership.md)）。
+模型金鑰設定在 `.env`（`OLLAMA_*`、`GEMINI_API_KEY`）；沒設定時推薦與向量化回 503 固定代碼，不會假造結果。
+真人驗證仍未接上辨識模型，`POST /onboarding/selfie` 會回 `status=unavailable`。
 
 ## 資料庫管理與匯入
 
@@ -137,8 +139,12 @@ CI 定義於 `.github/workflows/ci.yml`。目前尚未初始化 Git 或連接 Gi
 | Phase 5 真人驗證       | 影像檢查、私有服務、結果紀錄與 provider adapter；**真實模型／活體判斷／身分參照與政策待定** |
 | Phase 6 交友互動       | 雙向偏好篩選、like/pass、互讚配對、封鎖與取消配對                                           |
 | Phase 7 聊天           | 持久化訊息、Socket.IO、typing、presence、已讀、通知、重送去重                               |
+| AI 推薦回覆（AI 端）   | FastAPI `/internal/ai/*`、切片與向量、風格卡、摘要、話題區段、BullMQ worker                 |
+| AI 推薦回覆（後端）    | `POST /conversations/:id/reply-suggestions`、pgvector 檢索、訊息來源標記、背景工作與結果寫入 |
 
-Phase 8–10 的推薦 AI、對話分析與持續學習尚未實作。Phase 1–7 的本機 MVP 未包含正式產品的電子郵件驗證、密碼重設、檢舉／內容審核、TLS、帳號刪除與隱私法遵驗收。
+「AI 推薦回覆」的前端（按鈕、打字動畫、建議按鈕）尚未實作，規格見
+[AI 推薦回覆規格](docs/ai/REPLY-SUGGESTIONS-SPEC.md)。
+Phase 8–10 的其他推薦 AI、對話分析與持續學習尚未實作。Phase 1–7 的本機 MVP 未包含正式產品的電子郵件驗證、密碼重設、檢舉／內容審核、TLS、帳號刪除與隱私法遵驗收。
 
 ## 文件導讀
 
@@ -151,6 +157,7 @@ Phase 8–10 的推薦 AI、對話分析與持續學習尚未實作。Phase 1–
 - [架構](docs/architecture/ARCHITECTURE.md)／[ADR](docs/architecture/adr/0001-local-mvp-boundaries.md)：服務邊界與本機 MVP 的簡化。
 - [Prisma schema](apps/api/prisma/schema.prisma)：實際資料庫來源；[原始 ERD](docs/database/ERD.md) 保留作設計參考。
 - [AI 服務說明](services/ai/README.md)：provider 契約、環境設定與測試。
+- [AI 推薦回覆規格](docs/ai/REPLY-SUGGESTIONS-SPEC.md)：功能規則、資料來源、內部 API、資料表與實測紀錄。
 - [安全](SECURITY.md)／[資料處理](PRIVACY.md)／[貢獻方式](CONTRIBUTING.md)。
 
 ### 本機登入網址

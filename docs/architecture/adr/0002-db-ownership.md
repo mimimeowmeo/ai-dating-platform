@@ -26,7 +26,8 @@
 ## 做法
 
 - 向量欄位在 `schema.prisma` 宣告為 `Unsupported("vector(768)")?`，並啟用 `postgresqlExtensions` 預覽功能與 `extensions = [vector]`。
-- 寫入：npm `pgvector` 的 `toSql()` ＋ `$executeRaw ... ${v}::vector`。
+- 寫入：`$executeRaw ... ${toVector(v)}::vector`；`toVector()` 在 `apps/api/src/ai-text.ts`，
+  輸出與 npm `pgvector` 的 `toSql()`（JSON.stringify）相同，另外檢查維度與 NaN，因此不加這個相依套件。
 - 搜尋：`$queryRaw ... ORDER BY embedding <=> ${q}::vector LIMIT k`（cosine 距離）；先用 `conversation_id`／`user_id` 的 B-tree 索引縮小範圍做精確搜尋，資料量大到變慢時才加 HNSW。
 - 所有原生 SQL 集中在同一個 `VectorStore` service，避免散落各處。
 - `dating` 資料庫已安裝 pgvector 0.8.6。

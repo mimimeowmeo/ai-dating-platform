@@ -20,10 +20,47 @@ services:
       timeout: 3s
       retries: 15
   # 📘 舊的 minio(dating-media)已移除；圖床改用 heartlink-minio(定義在 docker-compose.override.yml，bucket heartlink-media)。
-  # AI 服務（ai / ai-worker）已移除：真人驗證尚未接上實際模型，留著只是空轉。
-  # 移除後 POST /onboarding/selfie 會走既有的降級路徑，回 status=unavailable、
-  # reasonCode=AI_SERVICE_UNAVAILABLE（見 apps/api/src/profiles.ts 的 verifySelfie）。
-  # 原始碼保留在 services/ai/，要恢復就把這段服務定義加回來。
+  # AI 服務：2026-09-23 為了「AI 推薦回覆」重新加回來（docs/ai/REPLY-SUGGESTIONS-SPEC.md）。
+  # ai 提供同步的 /internal/ai/* 給 NestJS 呼叫；ai-worker 消費 ai-jobs、把結果放進 ai-results。
+  # 真人驗證仍然沒有接上辨識模型，POST /onboarding/selfie 會回 unavailable / MODEL_NOT_CONFIGURED。
+  # 沒有設定模型金鑰時，推薦與向量化會回 503 固定代碼，不會假造結果。
+  ai:
+    build: { context: ., dockerfile: services/ai/Dockerfile }
+    restart: unless-stopped
+    environment: &ai-env
+      AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:?請執行 pnpm setup}
+      REDIS_URL: redis://redis:6379
+      # 真人驗證的 provider（目前未選定，留空即維持 unavailable）。
+      AI_VERIFICATION_PROVIDER_URL: ${AI_VERIFICATION_PROVIDER_URL:-}
+      AI_VERIFICATION_PROVIDER_TOKEN: ${AI_VERIFICATION_PROVIDER_TOKEN:-}
+      # AI 推薦回覆：預設 Ollama Cloud 為主、Gemini 備援，向量一律用 gemini-embedding-2。
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      AI_REPLY_MODELS: ${AI_REPLY_MODELS:-ollama:gemma4:31b,gemini-3.8-flash}
+      AI_REPLY_MODEL_TIMEOUT_SECONDS: ${AI_REPLY_MODEL_TIMEOUT_SECONDS:-12}
+      AI_REPLY_THINKING_LEVEL: ${AI_REPLY_THINKING_LEVEL:-LOW}
+      AI_EXTRACTION_MODELS: ${AI_EXTRACTION_MODELS:-ollama:gemma4:31b}
+      AI_EMBEDDING_MODEL: ${AI_EMBEDDING_MODEL:-gemini-embedding-2}
+      AI_EMBEDDING_DIMENSIONS: ${AI_EMBEDDING_DIMENSIONS:-768}
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      redis: { condition: service_healthy }
+  ai-worker:
+    build: { context: ., dockerfile: services/ai/Dockerfile }
+    restart: unless-stopped
+    stop_grace_period: 30s
+    # 背景萃取的 worker（切片、話題區段、摘要、風格卡）；真人驗證的 worker 未啟用。
+    command: ["python", "-m", "app.reply.worker"]
+    environment: *ai-env
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.reply.worker_health"]
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
   api:
     build: { context: ., dockerfile: apps/api/Dockerfile }
     restart: unless-stopped
@@ -37,14 +74,19 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET:-heartlink-media}
       JWT_SECRET: ${JWT_SECRET:?請執行 pnpm setup}
-      # ai 服務已移除，這個位址一定連不上，verifySelfie 會走降級路徑。
-      AI_INTERNAL_URL: ${AI_INTERNAL_URL:-http://127.0.0.1:8000}
+      # 固定用服務名連線（同 S3_ENDPOINT 的做法）：.env 裡的 AI_INTERNAL_URL 是給
+      # 本機 pnpm dev 用的 127.0.0.1，帶進容器會連到容器自己而失敗。
+      # ai 沒起來時 AI 功能回 503 固定代碼，其他功能照常。
+      AI_INTERNAL_URL: http://ai:8000
       AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports: ["127.0.0.1:3001:3001"]
     depends_on:
       redis: { condition: service_healthy }
+      # 只等「已啟動」而不是「健康」：ai 沒有金鑰或模型暫時壞掉時，
+      # 其他功能仍要能用，AI 推薦則回 503 固定代碼。
+      ai: { condition: service_started }
     healthcheck:
       test:
         [

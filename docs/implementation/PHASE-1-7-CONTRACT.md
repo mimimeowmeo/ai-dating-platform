@@ -54,15 +54,36 @@
 - `POST /conversations` `{matchId}` → 對應聊天室，必須是有效配對成員。
 - `GET /conversations/:id` → 同上單一聊天室。
 - `GET /conversations/:id/messages?before=<ISO>&beforeId=<messageId>` → Message 陣列（依時間、id 升序，單頁最多 50）。游標為目前最舊訊息的 `createdAt` 與 `id`，時間相同的訊息不會在分頁邊界漏掉；只給 `before` 時沿用舊行為。
-- `POST /conversations/:id/messages` `{content,clientId}` → Message。
+- `POST /conversations/:id/messages` `{content,clientId,suggestionId?}` → Message。
+  `suggestionId` 選填：這則訊息採用了哪一則 AI 推薦，後端據此寫 `message_origins`（見下方「AI 推薦回覆」）。
+  推薦不存在、或不是本人在這個聊天室拿到的，回 404 `SUGGESTION_NOT_FOUND`。
 - `POST /conversations/:id/read` → `{ok:true}`。
 - Message：`{id,conversationId,senderId,content,clientId,createdAt}`；clientId 為 UUID，用於重送去重。
 - `GET /notifications` → `{id,type,payload,readAt,createdAt}` 陣列；`POST /notifications/:id/read` → `{ok:true}`。
-- Socket.IO path `/socket.io`，auth `{token}`；加入 `conversation:join` `{conversationId}`；傳送 `message:send` `{conversationId,content,clientId}`，ack `{ok,message? ,error?}`。
+- Socket.IO path `/socket.io`，auth `{token}`；加入 `conversation:join` `{conversationId}`；傳送 `message:send` `{conversationId,content,clientId,suggestionId?}`，ack `{ok,message? ,error?}`。
 - `typing` `{conversationId,isTyping}`、`conversation:read` `{conversationId}`；server 發出 `message:new`、`typing`、`conversation:read`、`notification:new`、`presence`。
 - Socket 與 HTTP 皆須逐次檢查成員、配對有效與封鎖狀態；封鎖／取消配對後禁止既有連線收發。
 - 推播時只有連線的 access token 失效才中斷該連線（前端會換新 token 後重連）；無權存取某聊天室時只略過該事件。
 - `presence`：使用者第一條連線建立時，通知其所有有效聊天室「上線」；最後一條連線中斷 3 秒後仍未重連，才通知「離線」。前端只採用對方的 `presence` 與 `typing` 事件。
+
+## AI 推薦回覆
+
+完整規則見 [AI 推薦回覆規格](../ai/REPLY-SUGGESTIONS-SPEC.md)。
+
+- `POST /conversations/:id/reply-suggestions` → `{requestId,status,mode,notice,suggestions[]}`。
+  - `status`：`ok`（3～5 則）／`partial`（1～2 則，`notice` 說明原因）／`empty`（0 則）。
+  - `mode`：`opener`／`reply`／`follow_up`／`revive`，由 AI 服務依聊天室狀態判斷。
+  - `suggestions[]`：`{id,rank,text,intent}`；`rank 1` 用 B 的寫法，其餘為 A 80%／B 20%。
+    `id` 就是送訊息時要帶的 `suggestionId`。
+  - 必須是聊天室成員，否則 404；每人每分鐘上限 30 次（防連打，不是產品配額）。
+  - AI 服務不可用時回 503 `AI_UNAVAILABLE`（未設定模型時 `AI_NOT_CONFIGURED`），
+    並仍會留下一筆 `ai_suggestion_requests`（`status=error`）。
+- 送出訊息時帶 `suggestionId`，後端比較推薦原文與實際內容的相似度並寫入 `message_origins`：
+  ≥0.95 `ai_verbatim`、≥0.5 `ai_edited`、其餘 `human`（仍保留出處以便評估修改幅度）。
+  來源不會出現在 Message 或 `message:new` 事件裡，聊天對象看不到。
+- 背景工作（BullMQ `ai-jobs` → `ai-results`）：送出訊息後排切片與話題區段（debounce 2 分鐘）、
+  滿 50 則排摘要、送訊息者累積 200 則真人訊息排風格卡；結果由 NestJS 寫入資料庫。
+
 
 ## 執行環境
 

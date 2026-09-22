@@ -53,9 +53,12 @@ Browser -> NestJS -> FastAPI AI -> NestJS -> Browser
 
 ### Sync Reply Suggestions
 ```text
-Browser -> NestJS -> FastAPI AI /embed -> NestJS (pgvector search)
+Browser -> NestJS POST /conversations/:id/reply-suggestions
+        -> FastAPI AI /embed -> NestJS (pgvector search)
         -> FastAPI AI /reply-suggestions -> NestJS (persist) -> Browser
 ```
+The `ai-results` consumer runs inside the NestJS process (`AiJobs`), so background results are
+written by the same service that owns the database.
 
 Details: [AI reply suggestions spec](../ai/REPLY-SUGGESTIONS-SPEC.md).
 

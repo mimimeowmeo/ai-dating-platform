@@ -149,6 +149,8 @@ export class Realtime
             conversationId: z.string().uuid(),
             content: z.string(),
             clientId: z.string().uuid(),
+            // 與 HTTP 的送訊息同一組欄位：帶著推薦 id 才能標記訊息來源（規格 5.6）。
+            suggestionId: z.string().uuid().optional(),
           })
           .strict(),
         body,
@@ -157,6 +159,7 @@ export class Realtime
         message: await this.social.send(id, dto.conversationId, {
           content: dto.content,
           clientId: dto.clientId,
+          ...(dto.suggestionId ? { suggestionId: dto.suggestionId } : {}),
         }),
       };
     });
