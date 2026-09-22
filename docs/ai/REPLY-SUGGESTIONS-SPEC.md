@@ -9,9 +9,9 @@
 
 | 階段 | 範圍 | 狀態 |
 |---|---|---|
-| **1. AI**（`services/ai`） | 產生推薦、向量化、對話切片、AI 話題區段、聊天室摘要、風格卡萃取；內部 HTTP API；背景 worker；單元測試 | **本階段** |
-| 2. 後端（`apps/api`） | Prisma 資料表與 migration、pgvector 讀寫、權限與視窗 SQL、呼叫 AI API、BullMQ 生產者與結果佇列消費者、訊息來源標記 | 下一階段 |
-| 3. 前端（`apps/web`） | 按鈕、打字動畫、建議按鈕列、各種互動狀態 | 最後 |
+| 1. AI（`services/ai`） | 產生推薦、向量化、對話切片、AI 話題區段、聊天室摘要、風格卡萃取；內部 HTTP API；背景 worker；單元測試 | 完成（2026-09-23） |
+| 2. 後端（`apps/api`） | Prisma 資料表與 migration、pgvector 讀寫、權限與視窗 SQL、呼叫 AI API、BullMQ 生產者與結果佇列消費者、訊息來源標記 | 完成（2026-09-23） |
+| **3. 前端（`apps/web`）** | 按鈕、打字動畫、建議按鈕列、各種互動狀態 | **下一階段** |
 
 ## 1. 功能概述
 
@@ -130,7 +130,7 @@ AI 服務依聊天室狀態自動判斷（後端也可以直接指定）：
 ### 5.5 聊天室摘要
 - 每累積 50 則新訊息，由背景工作用「舊摘要＋新訊息」更新；上限 600 字。
 
-### 5.6 訊息來源標記（後端階段實作）
+### 5.6 訊息來源標記（已實作）
 - A 送出訊息時帶上 `suggestionId`；後端比較 AI 推薦原文與實際送出內容的相似度：
   - ≥ 0.95：`ai_verbatim`；0.5～0.95：`ai_edited`；< 0.5：`human`。
   - ≥ 0.5 都算 AI，萃取風格時排除。
@@ -197,7 +197,7 @@ AI 服務依聊天室狀態自動判斷（後端也可以直接指定）：
 - 結果放進 queue `ai-results`，job 名稱與來源相同，資料為 `{ "sourceJobId", "name", "key", "result" }`（`key` 是 conversationId 或 userId）。
 - 失敗時 worker 丟出固定代碼（例如 `EXTRACTION_UNAVAILABLE`），由 BullMQ 依 job 設定重試；錯誤紀錄不含訊息內容。
 
-## 9. 資料表規劃（後端階段實作）
+## 9. 資料表（已實作）
 
 | 表 | 主要欄位 | 索引／備註 |
 |---|---|---|
@@ -211,7 +211,13 @@ AI 服務依聊天室狀態自動判斷（後端也可以直接指定）：
 | `user_style_facets` | user_id、profile_version、kind、statement、weight、`embedding vector(768)` | `(user_id, profile_version)` |
 | `ai_topic_spans` | conversation_id、起訖訊息、發起訊息、發起者、結束原因、版本 | — |
 
-向量欄位用 Prisma `Unsupported("vector(768)")`，讀寫走 `$executeRaw`／`$queryRaw`＋ npm `pgvector`。
+向量欄位用 Prisma `Unsupported("vector(768)")`，讀寫走 `$executeRaw`／`$queryRaw`。
+向量字面值（`[0.1,0.2,…]`）由 `apps/api/src/ai-text.ts` 的 `toVector()` 產生，內容與 npm `pgvector` 的
+`toSql()` 相同（就是 JSON.stringify），順便檢查維度與 NaN，所以不另外加一個相依套件。
+
+實際定義見 `apps/api/prisma/schema.prisma` 與 migration `20260923000000_ai_reply_suggestions`；
+所有原生 SQL 集中在 `apps/api/src/ai-store.ts` 的 `VectorStore`（ADR 0002）。
+`ai_suggestions` 用 `rank = 0` 保存被後處理刪掉的候選，`rejected_reason` 記原因代碼。
 
 ## 10. 模型與環境變數（`services/ai`）
 
@@ -301,3 +307,37 @@ Pydantic AI 官方文件說明 Ollama Cloud 不會強制套用 JSON schema，所
 - **最後決定（使用者，同日）**：產生推薦 `AI_REPLY_MODELS=ollama:gemma4:31b,gemini-3.8-flash`（Ollama Cloud 為主、Gemini 備用；
   太慢的 Flash-Lite 不放進鏈裡），並加上「每個模型各自逾時」（`TimeoutModel`，預設 12 秒）：
   主模型很慢而不是直接回錯時，也會在 12 秒時讓給下一個模型，不會把 25 秒的總逾時耗光。
+
+## 15. 後端實測紀錄（2026-09-23）
+
+本機 `dating` 資料庫、Ollama Cloud `gemma4:31b`、Gemini `gemini-embedding-2`，
+API 以 ts-node 跑在 3005，AI 服務與 worker 在本機。
+
+| 情境 | 結果 |
+|---|---|
+| 剛聊完 4 則就按推薦（沒有切片／摘要／風格卡） | 2.3 秒、5 則、輸入 1,145 tokens |
+| 另一組對話、冷啟動 | 3.9 秒、5 則、輸入 1,214 tokens |
+| 補上切片與摘要後再按（有 RAG） | 5.1 秒、5 則、輸入 1,720 tokens（多了摘要與檢索到的片段） |
+| 同一情境連按第二次（換一批） | 3 則，與上一批**完全重複 0 則** |
+| 關掉 AI 服務後按 | 18 ms 回 503 `AI_UNAVAILABLE`，並留下 `status=error`、`error_code=AI_UNREACHABLE` 的請求紀錄 |
+
+| 訊息來源標記 | 結果 |
+|---|---|
+| 原封不動送出推薦 | `ai_verbatim`、similarity 1.0 |
+| 推薦後面加四個字再送 | `ai_edited`、similarity 0.842 |
+| 整句重寫 | `human`，但仍保留 `suggestion_id`（評估修改幅度用） |
+| 拿別人的 `suggestionId` 送訊息 | 404 `SUGGESTION_NOT_FOUND` |
+| 沒帶 `suggestionId` 的一般訊息 | 不寫 `message_origins`（查詢時視為 human） |
+
+背景工作（NestJS 排入 `ai-jobs` → Python worker → `ai-results` → NestJS 寫入）：
+
+| job | 結果 |
+|---|---|
+| `build-style` | 風格卡寫入 `user_style_profiles`（confidence low／sampleSource mixed），14 條特徵句**全部**有 768 維向量 |
+| `chunk-embed` | debounce 2 分鐘後執行，1 段切片、`is_open=true`、`embedding_model=gemini-embedding-2` |
+| `topic-spans` | 偵測到 1 個 AI 話題區段（`end_of_data`、`topic-span-v1`） |
+| `summarize` | `gemma4:31b`／`summary-v1`，`until_message_id` 正確指向最後一則 |
+
+自動化測試：`apps/api/test` 共 11 項（`ai-text` 5 項單元測試不需要任何服務；
+整合測試新增「AI 推薦回覆」一項，AI 服務不在時驗證 503 與 `status=error` 的紀錄，
+來源標記則直接在資料庫放一則推薦來驗，不依賴模型）。

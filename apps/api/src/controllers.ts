@@ -28,6 +28,7 @@ import {
 } from "./core";
 import { Profiles } from "./profiles";
 import { Social } from "./social";
+import { ReplySuggestions } from "./ai-reply";
 const upload = FileInterceptor("file", {
   limits: { fileSize: 8 * 1024 * 1024, files: 1 },
 });
@@ -64,6 +65,7 @@ export class ProductController {
   constructor(
     private profiles: Profiles,
     private social: Social,
+    private replies: ReplySuggestions,
   ) {}
   @Get("profile") profile(@Req() r: AuthRequest) {
     return this.profiles.mine(r.userId);
@@ -197,6 +199,14 @@ export class ProductController {
     @Param("id") id: string,
   ) {
     return this.social.read(r.userId, id);
+  }
+  // 按一次「AI 推薦回覆」：回 3～5 則建議，第 1 則給前端用打字動畫填進輸入框。
+  // 每一則都帶 id，送訊息時當作 suggestionId 回傳，後端才能標記訊息來源。
+  @Post("conversations/:id/reply-suggestions") replySuggestions(
+    @Req() r: AuthRequest,
+    @Param("id") id: string,
+  ) {
+    return this.replies.suggest(r.userId, id);
   }
   @Get("notifications") notifications(@Req() r: AuthRequest) {
     return this.social.notifications(r.userId);

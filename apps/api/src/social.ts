@@ -12,10 +12,14 @@ import {
   Infrastructure,
 } from "./core";
 import { Profiles, card, traitCodes, userInclude } from "./profiles";
+import { MessageOrigins } from "./ai-origins";
+import { AiJobs } from "./ai-jobs";
 const messageInput = z
   .object({
     content: z.string().trim().min(1).max(2000),
     clientId: z.string().uuid(),
+    // 這則訊息是從哪個 AI 推薦來的（選填）；後端據此標記來源（規格 5.6）。
+    suggestionId: z.string().uuid().optional(),
   })
   .strict();
 @Injectable()
@@ -24,6 +28,8 @@ export class Social {
     private db: Database,
     private profiles: Profiles,
     private infra: Infrastructure,
+    private origins: MessageOrigins,
+    private jobs: AiJobs,
   ) {}
   publish: (userId: string, event: string, data: unknown) => void = () => {};
   revoke: (conversationId: string) => void = () => {};
@@ -384,7 +390,8 @@ export class Social {
     return messages.reverse();
   }
   async send(id: string, conversationId: string, body: unknown) {
-    const data = parse(messageInput, body);
+    // suggestionId 不是 messages 的欄位，拆出來單獨處理（寫進 message_origins）。
+    const { suggestionId, ...data } = parse(messageInput, body);
     await this.infra.limit(`message:${id}`, 60);
     const initial = await this.access(id, conversationId);
     const out = await this.db.$transaction(async (tx) => {
@@ -408,6 +415,14 @@ export class Social {
       const message = await tx.message.create({
         data: { ...data, senderId: id, conversationId },
       });
+      // 來源標記與訊息同一個交易：不會出現「訊息存了、來源沒存」的狀態（規格 5.6）。
+      await this.origins.record(tx, {
+        messageId: message.id,
+        conversationId,
+        senderId: id,
+        content: message.content,
+        suggestionId,
+      });
       await tx.conversation.update({
         where: { id: conversationId },
         data: { updatedAt: new Date() },
@@ -428,6 +443,11 @@ export class Social {
         type: "message",
         conversationId,
       });
+      // 背景 AI 工作（切片、話題區段、摘要、風格卡）不擋回應：
+      // 排程失敗只影響之後的推薦品質，不該讓使用者送不出訊息。
+      void this.jobs
+        .afterMessage(conversationId, id)
+        .catch(() => console.error("ai_jobs_enqueue_failed"));
     }
     return out.message;
   }

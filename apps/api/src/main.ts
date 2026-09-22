@@ -19,6 +19,12 @@ import { HealthController, ProductController } from "./controllers";
 import { Profiles } from "./profiles";
 import { Social } from "./social";
 import { Realtime } from "./realtime";
+import { AiClient } from "./ai-client";
+import { AiData } from "./ai-data";
+import { AiJobs } from "./ai-jobs";
+import { MessageOrigins } from "./ai-origins";
+import { ReplySuggestions } from "./ai-reply";
+import { VectorStore } from "./ai-store";
 @Module({
   controllers: [AuthController, HealthController, ProductController],
   providers: [
@@ -30,6 +36,15 @@ import { Realtime } from "./realtime";
     Profiles,
     Social,
     Realtime,
+    // AI 推薦回覆（docs/ai/REPLY-SUGGESTIONS-SPEC.md）：
+    // VectorStore 管原生 SQL 與 pgvector、AiData 組請求、AiClient 呼叫 AI 服務、
+    // AiJobs 負責背景工作與結果寫回、MessageOrigins 標記訊息來源。
+    VectorStore,
+    AiData,
+    AiClient,
+    AiJobs,
+    MessageOrigins,
+    ReplySuggestions,
   ],
 })
 class AppModule {}

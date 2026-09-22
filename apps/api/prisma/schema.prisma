@@ -1,10 +1,15 @@
 generator client {
   provider = "prisma-client-js"
+  // postgresqlExtensions：讓 schema 明確記錄「這個資料庫需要 pgvector」。
+  // 向量欄位用 Unsupported("vector(768)")，Prisma Client 讀不到它們，
+  // 一律由 VectorStore 以 $executeRaw／$queryRaw 存取（見 ADR 0002）。
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 model User {
@@ -29,6 +34,9 @@ model User {
   members ConversationMember[]
   messages Message[]
   notifications Notification[]
+  styleProfiles UserStyleProfile[]
+  styleFacets UserStyleFacet[]
+  suggestionRequests AiSuggestionRequest[]
   @@map("users")
 }
 
@@ -178,6 +186,10 @@ model Conversation {
   match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
   members ConversationMember[]
   messages Message[]
+  chunks ConversationChunk[]
+  summaries ConversationSummary[]
+  topicSpans AiTopicSpan[]
+  suggestionRequests AiSuggestionRequest[]
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
   @@map("conversations")
@@ -203,8 +215,12 @@ model Message {
   content String
   clientId String @map("client_id") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at")
+  origin MessageOrigin?
   @@unique([senderId, clientId])
   @@index([conversationId, createdAt])
+  // 萃取風格卡時要撈「某個人自己發出的訊息」（跨所有聊天室、依時間取視窗），
+  // 沒有這個索引會變成全表掃描（規格 9）。
+  @@index([senderId, createdAt])
   @@map("messages")
 }
 
@@ -218,4 +234,193 @@ model Notification {
   createdAt DateTime @default(now()) @map("created_at")
   @@index([userId, createdAt])
   @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// AI 推薦回覆（規格：docs/ai/REPLY-SUGGESTIONS-SPEC.md 第 9 節）
+// 這些表只由 NestJS 存取；Python AI 服務不連資料庫（ADR 0002）。
+// ---------------------------------------------------------------------------
+
+/// 一次「AI 推薦回覆」的請求紀錄：誰、在哪個聊天室、用哪個模型、花多少 token。
+/// 推薦品質要靠這些紀錄評估（規格 12），所以連失敗的請求也會留下（status=error）。
+model AiSuggestionRequest {
+  id String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  requesterId String @map("requester_id") @db.Uuid
+  requester User @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  /// opener／reply／follow_up／revive，由 AI 服務判斷後回傳。
+  mode String
+  /// 產生推薦時聊天室的最後一則訊息；用來確認推薦是針對哪個情境產生的。
+  lastMessageId String? @map("last_message_id") @db.Uuid
+  /// ok（3～5 則）／partial（1～2 則）／empty（0 則）／error（AI 服務不可用）。
+  status String
+  /// status=error 時的固定代碼，例如 LLM_UNAVAILABLE。
+  errorCode String? @map("error_code")
+  /// 備援鏈中實際回應的模型，例如 gemma4:31b。
+  modelName String? @map("model_name")
+  promptVersion String? @map("prompt_version")
+  inputTokens Int @default(0) @map("input_tokens")
+  outputTokens Int @default(0) @map("output_tokens")
+  modelRequests Int @default(0) @map("model_requests")
+  /// 後端收到請求到回應的總毫秒數（含向量檢索與模型呼叫）。
+  latencyMs Int @default(0) @map("latency_ms")
+  /// 不足 3 則時要顯示給使用者的說明。
+  notice String?
+  createdAt DateTime @default(now()) @map("created_at")
+  suggestions AiSuggestion[]
+  @@index([conversationId, createdAt])
+  @@index([requesterId, createdAt])
+  @@map("ai_suggestion_requests")
+}
+
+/// 產生過的每一則推薦，包含被後處理刪掉的候選（決策：全部保存到專案結束）。
+/// rank 1～5 是真的回給使用者的；rank 0 代表被刪掉的候選，原因在 rejectedReason。
+model AiSuggestion {
+  id String @id @default(uuid()) @db.Uuid
+  requestId String @map("request_id") @db.Uuid
+  request AiSuggestionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  rank Int
+  text String
+  /// answer／question／callback／humor／plan／share；被刪掉的候選沒有這些欄位。
+  intent String?
+  /// partner（照 B 的寫法）或 blend（A 為主、往 B 微調）。
+  styleTarget String? @map("style_target")
+  styleDistance Float? @map("style_distance")
+  reason String?
+  /// 被刪掉的原因代碼，例如 CONTACT_LINK、DUPLICATE、TOO_LONG、OVER_LIMIT。
+  rejectedReason String? @map("rejected_reason")
+  /// 使用者真的送出這則推薦時填入（第 1 則採用率就是用這個算的）。
+  chosenAt DateTime? @map("chosen_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  origins MessageOrigin[]
+  @@index([requestId, rank])
+  @@map("ai_suggestions")
+}
+
+/// 訊息是真人打的還是 AI 推薦送出的。
+/// 刻意獨立一張表，不加在 messages：送出訊息時整筆會透過 message:new 推給對方，
+/// 加在 messages 會讓聊天對象看到「這則是 AI 產生的」（規格 5.6）。
+model MessageOrigin {
+  messageId String @id @map("message_id") @db.Uuid
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  /// human／ai_verbatim（原封不動送出）／ai_edited（改過再送）。
+  origin String
+  /// 送出內容與推薦原文的相似度；human 是 0。≥0.5 都算 AI，萃取風格時排除。
+  similarity Float @default(0)
+  suggestionId String? @map("suggestion_id") @db.Uuid
+  suggestion AiSuggestion? @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([origin])
+  @@index([suggestionId])
+  @@map("message_origins")
+}
+
+/// 對話切片（RAG 的檢索單位）：30 分鐘／12 則／400 tokens 切一段，重疊 2 則。
+/// isOpen 代表這段還可能長大，有新訊息時由後端刪掉重建（規格 5.2）。
+model ConversationChunk {
+  id String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  firstMessageId String @map("first_message_id") @db.Uuid
+  lastMessageId String @map("last_message_id") @db.Uuid
+  firstAt DateTime @map("first_at")
+  lastAt DateTime @map("last_at")
+  messageCount Int @map("message_count")
+  /// 片段原文（每行「時間 暱稱：內容」），直接放進 prompt。
+  content String
+  tokenEstimate Int @map("token_estimate")
+  isOpen Boolean @default(false) @map("is_open")
+  /// 切片規則的版本（chunk-v1）；規則改了就依版本重建。
+  chunkVersion String @map("chunk_version")
+  /// 產生向量的模型；換模型時要整批重算，所以要記下來。
+  embeddingModel String? @map("embedding_model")
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([conversationId, lastAt])
+  @@map("conversation_chunks")
+}
+
+/// 聊天室摘要：每累積 50 則新訊息由背景工作更新一次（規格 5.5）。
+/// 保留歷史版本，最新一筆才會放進 prompt。
+model ConversationSummary {
+  id String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  /// 這份摘要涵蓋到哪一則訊息；下次更新從它之後的訊息開始。
+  untilMessageId String @map("until_message_id") @db.Uuid
+  summary String
+  modelName String? @map("model_name")
+  promptVersion String? @map("prompt_version")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([conversationId, createdAt])
+  @@map("conversation_summaries")
+}
+
+/// 使用者的風格卡（寫法統計＋語氣）。每次重新萃取就新增一個版本，方便比較與回溯。
+model UserStyleProfile {
+  userId String @map("user_id") @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version Int
+  /// 風格卡格式版本（style-card-v1）。
+  featureVersion String @map("feature_version")
+  /// high（≥30 則真人訊息）／low／none。
+  confidence String
+  /// 寫法樣本來源：chat／mixed／bio／none。
+  sampleSource String @map("sample_source")
+  messageCount Int @default(0) @map("message_count")
+  windowFrom DateTime? @map("window_from")
+  windowTo DateTime? @map("window_to")
+  /// StyleStats：字數、emoji、問句、笑聲、語助詞等數值（JSON）。
+  stats Json
+  voiceNotes String[] @default([]) @map("voice_notes")
+  bioSample String @default("") @map("bio_sample")
+  modelName String? @map("model_name")
+  promptVersion String? @map("prompt_version")
+  embeddingModel String? @map("embedding_model")
+  createdAt DateTime @default(now()) @map("created_at")
+  facets UserStyleFacet[]
+  @@id([userId, version])
+  @@index([userId, createdAt])
+  @@map("user_style_profiles")
+}
+
+/// 風格卡上的一條抽象特徵句（例如「聊到登山會比較熱絡」）與它的向量。
+/// 產生推薦時用查詢向量找出「跟目前話題最相關」的幾條放進 prompt。
+model UserStyleFacet {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  profileVersion Int @map("profile_version")
+  profile UserStyleProfile @relation(fields: [userId, profileVersion], references: [userId, version], onDelete: Cascade)
+  /// topic（喜歡的話題）／tone（語氣）／habit（習慣）／avoid（避開的話題）。
+  kind String
+  statement String
+  weight Float @default(0.5)
+  /// 有幾批訊息支持這條特徵。
+  evidence Int @default(0)
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, profileVersion])
+  @@map("user_style_facets")
+}
+
+/// AI 推薦開啟的話題區段：區段內「發起者自己的訊息」在萃取風格時話題喜好降權 ×0.3。
+/// 同一則發起訊息只會有一個區段，所以用 (conversationId, initiatingMessageId) 當唯一鍵。
+model AiTopicSpan {
+  id String @id @default(uuid()) @db.Uuid
+  conversationId String @map("conversation_id") @db.Uuid
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  initiatingMessageId String @map("initiating_message_id") @db.Uuid
+  initiatorId String @map("initiator_id") @db.Uuid
+  startMessageId String @map("start_message_id") @db.Uuid
+  endMessageId String @map("end_message_id") @db.Uuid
+  messageCount Int @map("message_count")
+  /// time_gap／topic_shift／cap／end_of_data。
+  endReason String @map("end_reason")
+  detectorVersion String @map("detector_version")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@unique([conversationId, initiatingMessageId])
+  @@index([initiatorId])
+  @@map("ai_topic_spans")
 }
