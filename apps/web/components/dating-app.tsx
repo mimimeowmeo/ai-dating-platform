@@ -28,6 +28,8 @@ import {
   MapPin,
   MessageCircle,
   Moon,
+  RefreshCw,
+  Send,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -38,6 +40,7 @@ import {
 import {
   api,
   refresh,
+  requestSuggestions,
   send,
   useAuth,
   genderLabels,
@@ -47,6 +50,7 @@ import {
   type Match,
   type Conversation,
   type Message,
+  type ReplySuggestion,
   type User,
 } from "@/lib/api";
 import { HeartIcon, LogoMark } from "@/components/icons";
@@ -130,12 +134,19 @@ function Empty({
 function Portrait({
   person,
   large = false,
+  small = false,
 }: {
   person: { displayName: string; photos?: { url: string }[] };
   large?: boolean;
+  // small：聊天室訊息旁邊的小頭像（36px），沒有照片時退回顯示名字第一個字。
+  small?: boolean;
 }) {
   return (
-    <div className={large ? "portrait large" : "portrait"}>
+    <div
+      className={["portrait", large ? "large" : "", small ? "small" : ""]
+        .filter(Boolean)
+        .join(" ")}
+    >
       {person.photos?.[0] ? (
         <img src={person.photos[0].url} alt={`${person.displayName}的照片`} />
       ) : (
@@ -2006,6 +2017,35 @@ function MatchesPage() {
 }
 function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
   const q = useData<Conversation[]>("/conversations");
+  // 對話列表要顯示每個人的上線狀態：presence 事件只有狀態變化時才會來，
+  // 所以連上線時先跟伺服器要一份「現在誰在線上」的快照。
+  const [onlineIds, setOnlineIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (!socket) return;
+    const snapshot = () =>
+      socket.emit(
+        "presence:list",
+        {},
+        (ack: { ok: boolean; online?: string[] }) => {
+          if (ack.ok && ack.online) setOnlineIds(ack.online);
+        },
+      );
+    const update = (d: { userId: string; online: boolean }) =>
+      setOnlineIds((ids) =>
+        d.online
+          ? ids.includes(d.userId)
+            ? ids
+            : [...ids, d.userId]
+          : ids.filter((userId) => userId !== d.userId),
+      );
+    snapshot();
+    socket.on("connect", snapshot);
+    socket.on("presence", update);
+    return () => {
+      socket.off("connect", snapshot);
+      socket.off("presence", update);
+    };
+  }, [socket]);
   const index = q.data?.findIndex((c) => c.id === id) ?? -1;
   const selected = index >= 0 ? q.data?.[index] : undefined;
   const unread = q.data?.reduce((sum, c) => sum + c.unreadCount, 0) || 0;
@@ -2049,17 +2089,26 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                     }
                     key={c.id}
                   >
-                    <Avatar name={c.otherUser.displayName} tone={i} />
+                    <span className="conversation-avatar">
+                      <Avatar name={c.otherUser.displayName} tone={i} />
+                      {/* 綠燈只在對方上線時出現。 */}
+                      {onlineIds.includes(c.otherUser.userId) && (
+                        <span className="online-dot" aria-label="上線中" />
+                      )}
+                    </span>
                     <div className="conversation-text">
                       <div className="conversation-top">
                         <b>{c.otherUser.displayName}</b>
-                        <time>{listTime(c.lastMessage?.createdAt)}</time>
                       </div>
                       <p>{c.lastMessage?.content || "從一句你好開始吧。"}</p>
                     </div>
-                    {c.unreadCount > 0 && (
-                      <span className="unread">{c.unreadCount}</span>
-                    )}
+                    {/* 時間與未讀數放同一欄並置中，右側才會對齊。 */}
+                    <div className="conversation-meta">
+                      <time>{listTime(c.lastMessage?.createdAt)}</time>
+                      {c.unreadCount > 0 && (
+                        <span className="unread">{c.unreadCount}</span>
+                      )}
+                    </div>
                   </Link>
                 ))}
               </div>
@@ -2068,12 +2117,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
               </Link>
             </aside>
             {selected ? (
-              <Chat
-                key={selected.id}
-                conversation={selected}
-                tone={index}
-                socket={socket}
-              />
+              <Chat key={selected.id} conversation={selected} socket={socket} />
             ) : (
               <div className="chat-placeholder">
                 <MessageCircle size={42} />
@@ -2088,11 +2132,9 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
 }
 function Chat({
   conversation: c,
-  tone,
   socket,
 }: {
   conversation: Conversation;
-  tone: number;
   socket: Socket | null;
 }) {
   const user = useAuth((s) => s.user)!;
@@ -2110,9 +2152,24 @@ function Chat({
   const [hasOlder, setHasOlder] = useState(true);
   const [showProfile, setShowProfile] = useState(false);
   const end = useRef<HTMLDivElement>(null);
-  const draft = useRef<{ content: string; clientId: string } | null>(null);
+  const draft = useRef<{
+    content: string;
+    clientId: string;
+    suggestionId?: string;
+  } | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTyping = useRef(0);
+  // ── AI 推薦回覆（docs/ai/REPLY-SUGGESTIONS-SPEC.md）──────────────────
+  // 第 1 則會打字填進輸入框，這裡放的是「其餘建議」，顯示成輸入框上方的按鈕。
+  const [suggestions, setSuggestions] = useState<ReplySuggestion[]>([]);
+  // 等後端回應的期間：輸入框邊框跑彩光，AI 鈕與傳送鍵都停用。
+  const [suggesting, setSuggesting] = useState(false);
+  // 不足 3 則時後端會附一句說明（規格 4.1：顯示剩下的就好，不硬湊）。
+  const [notice, setNotice] = useState("");
+  // 目前輸入框的內容來自哪一則推薦；送出時一起帶給後端判斷訊息來源（規格 5.6）。
+  const suggestionId = useRef<string | null>(null);
+  // 打字動畫的計時器；使用者自己打字、送出或離開聊天室時都要清掉。
+  const typer = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
     const saved = c.otherLastReadAt;
     if (saved) setReadAt((current) => (current > saved ? current : saved));
@@ -2142,6 +2199,8 @@ function Chat({
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [messages.length]);
+  // 切換聊天室或離開頁面時停掉打字動畫，計時器不會在元件消失後繼續跑。
+  useEffect(() => () => stopTyping(), [c.id]);
   useEffect(() => {
     const markRead = () => {
       if (document.visibilityState === "visible")
@@ -2217,15 +2276,77 @@ function Chat({
       if (typingTimer.current) clearTimeout(typingTimer.current);
     };
   }, [c.id, otherId, socket, client]);
+  /**
+   * 停掉打字動畫。
+   * 使用者自己打字、送出訊息或離開聊天室時都要呼叫；
+   * 不停掉的話計時器會繼續往輸入框塞字，把使用者打到一半的內容蓋掉。
+   */
+  function stopTyping() {
+    if (typer.current) clearInterval(typer.current);
+    typer.current = null;
+  }
+  /**
+   * 把第 1 則推薦用打字動畫填進輸入框（每 40 毫秒一個字）。
+   *
+   * 同時記下這則推薦的 id：即使使用者之後改了幾個字，送出時仍然會帶著它，
+   * 由後端比對相似度決定 ai_verbatim／ai_edited／human（規格 5.6）。
+   */
+  function typeIn(text: string, id: string) {
+    stopTyping();
+    suggestionId.current = id;
+    setContent("");
+    let shown = 0;
+    typer.current = setInterval(() => {
+      shown += 1;
+      setContent(text.slice(0, shown));
+      if (shown >= text.length) stopTyping();
+    }, 40);
+  }
+  /**
+   * 點了輸入框上方的建議按鈕：直接換掉輸入框內容（不跑打字動畫），
+   * 並把來源換成這一則推薦。
+   */
+  function applySuggestion(suggestion: ReplySuggestion) {
+    stopTyping();
+    suggestionId.current = suggestion.id;
+    setContent(suggestion.text);
+  }
+  /**
+   * 按下輸入框裡的「AI 推薦」：向後端要一批建議。
+   *
+   * 成功：第 1 則打字填入輸入框，其餘變成上方的按鈕；按鈕會變成「換一批」，
+   * 再按一次後端會避開同一情境下已經給過的句子。
+   * 失敗：顯示後端回來的中文訊息（例如「AI 忙碌中，請稍後再試。」），輸入框內容不動。
+   */
+  async function askAi() {
+    if (suggesting || closed) return;
+    setSuggesting(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await requestSuggestions(c.id);
+      const [first, ...rest] = result.suggestions;
+      setSuggestions(rest);
+      setNotice(result.notice || "");
+      if (first) typeIn(first.text, first.id);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSuggesting(false);
+    }
+  }
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!content.trim() || busy || closed) return;
+    // 等待 AI 推薦時傳送鍵是停用的；按 Enter 也會走到這裡，所以要一起擋下。
+    if (!content.trim() || busy || suggesting || closed) return;
     setBusy(true);
     setError("");
     if (!draft.current || draft.current.content !== content.trim())
       draft.current = {
         content: content.trim(),
         clientId: crypto.randomUUID(),
+        // 這則訊息是從哪一則 AI 推薦來的；沒有用推薦就不送這個欄位。
+        ...(suggestionId.current ? { suggestionId: suggestionId.current } : {}),
       };
     try {
       const message = await send<Message>(
@@ -2235,6 +2356,11 @@ function Chat({
       merge([message]);
       setContent("");
       draft.current = null;
+      // 送出後收起這一批建議：對話已經往前走，舊建議不再適用（要新的就再按一次）。
+      stopTyping();
+      suggestionId.current = null;
+      setSuggestions([]);
+      setNotice("");
       socket?.emit("typing", { conversationId: c.id, isTyping: false });
       await client.invalidateQueries({ queryKey: ["/conversations"] });
     } catch (e) {
@@ -2253,11 +2379,10 @@ function Chat({
         >
           <ChevronLeft />
         </Link>
-        <Avatar name={c.otherUser.displayName} tone={tone} size="md" />
         <div className="chat-title">
           <h2>{c.otherUser.displayName}</h2>
           <small className={online ? "presence online" : "presence"}>
-            {online ? "在線中" : "離線"}
+            {online ? "上線" : "離線"}
           </small>
         </div>
         <button
@@ -2310,22 +2435,17 @@ function Chat({
                   </p>
                 )}
                 <div className={own ? "message own" : "message"}>
-                  {!own && (
-                    <Avatar
-                      name={c.otherUser.displayName}
-                      tone={tone}
-                      size="sm"
-                    />
-                  )}
+                  {!own && <Portrait person={c.otherUser} small />}
                   <div className="message-body">
                     <div className="bubble">{m.content}</div>
                     <small>
                       {clock(m.createdAt)}
+                      {/* 勾勾與「已讀」包成一行，顯示在送出時間的下面。 */}
                       {own && readAt >= m.createdAt && (
-                        <>
+                        <span className="read-mark">
                           <CheckCheck size={13} />
                           已讀
-                        </>
+                        </span>
                       )}
                     </small>
                   </div>
@@ -2341,30 +2461,104 @@ function Chat({
         <div className="typing-line" aria-live="polite">
           {typing ? "對方正在輸入…" : closed ? "這段對話已結束。" : ""}
         </div>
-        <input
-          aria-label="訊息內容"
-          placeholder="輸入訊息..."
-          value={content}
-          maxLength={2000}
-          disabled={closed}
-          onChange={(e) => {
-            setContent(e.target.value);
-            if (Date.now() - lastTyping.current > 1200) {
-              socket?.emit("typing", {
-                conversationId: c.id,
-                isTyping: !!e.target.value,
-              });
-              lastTyping.current = Date.now();
-            }
-          }}
-        />
-        <button
-          className="button"
-          aria-label="傳送訊息"
-          disabled={busy || !content.trim() || closed}
-        >
-          傳送
-        </button>
+        {(suggestions.length > 0 || notice) && (
+          <div className="ai-chips" aria-live="polite">
+            {suggestions.map((s) => (
+              // 點一下就把這一則換進輸入框；title 讓太長被截斷時仍看得到全文。
+              <button
+                key={s.id}
+                type="button"
+                title={s.text}
+                onClick={() => applySuggestion(s)}
+              >
+                {s.text}
+              </button>
+            ))}
+            {notice && <span className="ai-note">{notice}</span>}
+          </div>
+        )}
+        <div className="composer-row">
+          {/* 等待 AI 時多疊三層：光暈、彩光，以及蓋住中央的內底（做法同設計稿），
+              所以看到的是一圈沿著邊框順時針繞行的光。 */}
+          <div className={suggesting ? "ai-shell busy" : "ai-shell"}>
+            {suggesting && (
+              <>
+                <span className="ai-glow" aria-hidden="true">
+                  <i />
+                </span>
+                <span className="ai-ring" aria-hidden="true">
+                  <i />
+                </span>
+                <span className="ai-fill" aria-hidden="true" />
+              </>
+            )}
+            <input
+              aria-label="訊息內容"
+              placeholder="輸入訊息..."
+              value={content}
+              maxLength={2000}
+              disabled={closed}
+              onKeyDown={(e) => {
+                // 按 Enter 直接送出。中文輸入法選字時的 Enter 是「確認選字」，
+                // 那時 isComposing 為 true，不能當成送出，否則會把半形的注音送出去。
+                if (
+                  e.key !== "Enter" ||
+                  e.shiftKey ||
+                  e.nativeEvent.isComposing
+                )
+                  return;
+                e.preventDefault();
+                void submit(e);
+              }}
+              onChange={(e) => {
+                // 使用者自己打字就中斷打字動畫；清空輸入框等於放棄這則推薦。
+                stopTyping();
+                if (!e.target.value) suggestionId.current = null;
+                setContent(e.target.value);
+                if (Date.now() - lastTyping.current > 1200) {
+                  socket?.emit("typing", {
+                    conversationId: c.id,
+                    isTyping: !!e.target.value,
+                  });
+                  lastTyping.current = Date.now();
+                }
+              }}
+            />
+            {/* type="button"：它在 form 裡面，不加會變成送出訊息。 */}
+            <button
+              type="button"
+              className={suggesting ? "ai-suggest busy" : "ai-suggest"}
+              aria-label="AI 推薦回覆"
+              disabled={suggesting || closed}
+              onClick={askAi}
+            >
+              {suggesting ? (
+                <Loader2 size={15} className="spin" />
+              ) : suggestions.length ? (
+                <RefreshCw size={15} />
+              ) : (
+                <Sparkles size={15} />
+              )}
+              {/* 手機版只留圖示，這段文字會被 CSS 收起來。 */}
+              <span>
+                {suggesting
+                  ? "產生中"
+                  : suggestions.length
+                    ? "換一批"
+                    : "AI 推薦"}
+              </span>
+            </button>
+          </div>
+          <button
+            className="button"
+            aria-label="傳送訊息"
+            disabled={busy || suggesting || !content.trim() || closed}
+          >
+            {/* 手機版只留紙飛機圖示，桌面版維持「傳送」兩個字（由 CSS 切換）。 */}
+            <Send className="send-icon" size={18} aria-hidden="true" />
+            <span className="send-text">傳送</span>
+          </button>
+        </div>
       </form>
       {showProfile && (
         <PersonDialog

@@ -176,6 +176,46 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
       b.locator(".bubble", { hasText: "你好，這是一段真實的即時對話！" }),
     ).toBeVisible();
     await expect(a.getByText(/已讀/)).toBeVisible();
+    // AI 推薦回覆（用 b 這一頁測：a 裝了假時鐘，打字動畫的計時器不會照實際時間跑）。
+    const ai = b.getByRole("button", { name: "AI 推薦回覆" });
+    const box = b.getByRole("textbox", { name: "訊息內容" });
+    // 按鈕要在輸入框裡面，而不是跟傳送鍵並排在外面。
+    await expect(b.locator(".ai-shell .ai-suggest")).toBeVisible();
+    // 先把推薦 API 的請求扣住，確認完「等待中」的畫面再放行：
+    // CI 沒有 ai 服務，API 幾十毫秒就回 503，不扣住的話等待狀態一閃而過、測不到。
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = () => resolve();
+    });
+    await b.route("**/reply-suggestions", async (route) => {
+      await held;
+      await route.continue();
+    });
+    await box.fill("等待中按 Enter 不能送出");
+    await ai.click();
+    // 等待期間輸入框會跑彩光（busy），AI 鈕與傳送鍵都停用。
+    await expect(b.locator(".ai-shell")).toHaveClass(/busy/);
+    await expect(ai).toBeDisabled();
+    await expect(b.getByRole("button", { name: "傳送訊息" })).toBeDisabled();
+    // 按 Enter 也不能繞過停用的傳送鍵。
+    await box.press("Enter");
+    release();
+    const chip = b.locator(".ai-chips button").first();
+    const failed = b.locator(".chat-panel .error");
+    // CI 的 compose 沒有 ai 服務，這時要如實顯示錯誤而不是卡住或假裝成功。
+    await expect(chip.or(failed)).toBeVisible({ timeout: 45000 });
+    await b.unroute("**/reply-suggestions");
+    await expect(
+      b.locator(".bubble", { hasText: "等待中按 Enter 不能送出" }),
+    ).toHaveCount(0);
+    if (await chip.isVisible()) {
+      // 有建議時：第 1 則會被打字填進輸入框，點上方的按鈕可以換成另一則。
+      await expect(box).not.toHaveValue("");
+      const other = ((await chip.textContent()) ?? "").trim();
+      await chip.click();
+      await expect(box).toHaveValue(other);
+    }
+    await box.fill("");
     await a.reload();
     await expect(a.getByText(/已讀/)).toBeVisible();
     const renewed = a.waitForResponse(
@@ -317,7 +357,7 @@ test("多分頁同時開啟不會登出、仍即時收訊；手機開啟不存�
     ).toBeVisible();
     const b = await contexts[1].newPage();
     await b.goto(`/messages/${conversation.id}`);
-    await expect(a1.locator(".chat-header")).toContainText("在線中");
+    await expect(a1.locator(".chat-header")).toContainText("上線");
     await b.getByRole("textbox", { name: "訊息內容" }).fill("多分頁也收得到");
     await b.getByRole("button", { name: "傳送訊息" }).click();
     await expect(

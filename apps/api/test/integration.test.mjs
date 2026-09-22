@@ -893,7 +893,11 @@ test(
         request(`/conversations/${conversationId}/messages`, {
           method: "POST",
           user,
-          body: { content, clientId: randomUUID(), ...(suggestionId ? { suggestionId } : {}) },
+          body: {
+            content,
+            clientId: randomUUID(),
+            ...(suggestionId ? { suggestionId } : {}),
+          },
           expected: 201,
         });
       const verbatim = await send(a, suggestion.text, suggestion.id);
@@ -921,7 +925,11 @@ test(
       const rewrittenOrigin = await db.messageOrigin.findUnique({
         where: { messageId: rewritten.value.id },
       });
-      assert.equal(rewrittenOrigin.origin, "human", "改到看不出原樣就算真人寫的");
+      assert.equal(
+        rewrittenOrigin.origin,
+        "human",
+        "改到看不出原樣就算真人寫的",
+      );
       assert.equal(
         rewrittenOrigin.suggestionId,
         suggestion.id,

@@ -70,13 +70,18 @@ export class Realtime
       server.in(`conversation:${id}`).socketsLeave(`conversation:${id}`);
     };
   }
+  /**
+   * 上線／離線時通知每一位聊天對象。
+   * 發到對方的 user 房間（而不是聊天室房間）：對方只要登入就收得到，
+   * 不必先打開那個聊天室，對話列表才能顯示每個人的上線狀態。
+   */
   private announcePresence(userId: string, online: boolean) {
     void this.social
-      .activeConversationIds(userId)
-      .then((ids) => {
-        for (const conversationId of ids)
+      .activePartners(userId)
+      .then((partners) => {
+        for (const { conversationId, otherUserId } of partners)
           this.server
-            .to(`conversation:${conversationId}`)
+            .to(`user:${otherUserId}`)
             .emit("presence", { conversationId, userId, online });
       })
       .catch(() => {});
@@ -136,6 +141,26 @@ export class Realtime
         .to(`conversation:${c.id}`)
         .emit("presence", { conversationId: c.id, userId: id, online: true });
       return {};
+    });
+  }
+  /**
+   * 對話列表一次問出「我的聊天對象現在誰在線上」。
+   * presence 事件只有狀態變化時才會發，剛進頁面時需要這一份快照。
+   */
+  @SubscribeMessage("presence:list") presenceList(
+    @ConnectedSocket() socket: Socket,
+  ) {
+    return this.run(socket, async (id) => {
+      const partners = await this.social.activePartners(id);
+      return {
+        online: [
+          ...new Set(
+            partners
+              .map((partner) => partner.otherUserId)
+              .filter((userId) => this.online.has(userId)),
+          ),
+        ],
+      };
     });
   }
   @SubscribeMessage("message:send") send(

@@ -24,6 +24,8 @@
   --placeholder: #a59aa9;
   --focus: #eaa2c3;
   --track: #d3cad6;
+  /* 上線狀態的綠燈。 */
+  --online: #23a566;
   --portrait-a: #f4bcd5;
   --portrait-b: #cbb3e2;
   --error-bg: #fff0f4;
@@ -64,6 +66,8 @@
   --placeholder: #8a7d92;
   --focus: #e4749f;
   --track: #443b4f;
+  /* 深色底上要更亮一點才看得出來。 */
+  --online: #4ade80;
   --portrait-a: #71425c;
   --portrait-b: #4c3b6e;
   --error-bg: #3b1f27;
@@ -372,6 +376,11 @@ small {
 .portrait img {
   width: 100%;
   height: 100%;
+}
+.portrait.small {
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
 }
 .portrait.large {
   width: 100%;
@@ -1484,9 +1493,38 @@ input[type="range"] {
   border-color: var(--primary-soft);
   background: var(--primary-soft);
 }
+.conversation-avatar {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+/* 綠燈疊在頭像右下角，外圈用底色描一圈才不會跟頭像糊在一起。 */
+.online-dot {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--online);
+}
+.conversation.selected .online-dot {
+  border-color: var(--primary-soft);
+}
 .conversation-text {
   flex: 1;
   min-width: 0;
+}
+/* 時間與未讀數上下排成一欄並置中，右側對齊才整齊。 */
+.conversation-meta {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 46px;
 }
 .conversation-top {
   display: flex;
@@ -1575,7 +1613,7 @@ input[type="range"] {
   background: var(--track);
 }
 .presence.online::before {
-  background: var(--primary);
+  background: var(--online);
 }
 .chat-header .button {
   flex-shrink: 0;
@@ -1608,14 +1646,19 @@ input[type="range"] {
 }
 .message-body {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
+  /* 時間排在氣泡旁邊（自己的訊息在左、對方的在右），並與氣泡底部對齊。 */
+  align-items: flex-end;
+  gap: 8px;
   min-width: 0;
-  max-width: 45%;
+  /* 時間改成跟氣泡同一列之後，整體寬度放寬一點，氣泡才不會被擠得太窄。 */
+  max-width: 58%;
+}
+/* 自己的訊息氣泡靠右，所以時間翻到氣泡左邊。 */
+.message.own .message-body {
+  flex-direction: row-reverse;
 }
 .message:not(.own) .message-body {
-  max-width: calc(45% - 22px);
+  max-width: calc(58% - 22px);
 }
 .bubble {
   max-width: 100%;
@@ -1629,9 +1672,29 @@ input[type="range"] {
 }
 .message small {
   display: flex;
-  align-items: center;
-  gap: 4px;
+  /* 時間一行、已讀一行；整塊貼齊氣泡底線，長訊息換行時才不會飄到中間。 */
+  flex-direction: column;
+  align-items: flex-end;
+  align-self: flex-end;
+  flex-shrink: 0;
+  gap: 2px;
+  padding-bottom: 2px;
   color: var(--muted);
+  white-space: nowrap;
+}
+/* 對方的訊息時間在氣泡右邊，所以靠左對齊比較貼近氣泡。 */
+.message:not(.own) small {
+  align-items: flex-start;
+}
+/* 勾勾與「已讀」是同一行，放在時間底下。 */
+.read-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+/* 氣泡本身可以縮，時間永遠看得到。 */
+.message-body > .bubble {
+  min-width: 0;
 }
 .message.own {
   justify-content: flex-end;
@@ -1661,10 +1724,17 @@ input[type="range"] {
 .message-input {
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  /* 直向排列：AI 建議按鈕列在上面，輸入框與傳送鍵在下面一列。 */
+  flex-direction: column;
+  gap: 10px;
   padding: 20px;
   border-top: 1px solid var(--line);
+}
+/* 輸入框與傳送鍵這一列，維持原本的水平排版。 */
+.composer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .message-input .button {
   flex-shrink: 0;
@@ -1675,6 +1745,172 @@ input[type="range"] {
   left: 24px;
   color: var(--muted);
   font-size: 11px;
+}
+/* ── AI 推薦回覆（規格：docs/ai/REPLY-SUGGESTIONS-SPEC.md）───────────── */
+:root {
+  /* 桌面版用七彩，最像「AI 正在運算」。 */
+  --ai-ramp:
+    #ff5f8f, #ff9f45, #ffd447, #4fd39b, #3fb6ff, #7b7bff, #c46bff, #ff5f8f;
+  /* 外圈光暈的濃度，深色模式會再亮一點。 */
+  --ai-glow: 0.75;
+}
+/* 輸入框外殼：長得就是原本那個輸入框（邊框、底色、圓角），
+   真正的 <input> 與 AI 按鈕都是它裡面的一列，
+   所以再長的文字也不會被按鈕蓋住（之前用 padding 讓位，長字仍會被壓到）。
+   等待 AI 時的跑光（.ai-glow／.ai-ring／.ai-fill）也疊在這一層裡，做法見下方。 */
+.ai-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 52px;
+  padding: 0 8px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--page);
+}
+/* 外殼已經有邊框與內距，裡面的 input 只負責文字。 */
+.message-input .ai-shell input {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+/* 焦點框改畫在外殼上，看起來才是「整個輸入框被選取」。 */
+.message-input .ai-shell input:focus-visible {
+  outline: none;
+}
+.ai-shell:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+/* 等待 AI 回應時的跑光，做法與設計稿相同：
+   .ai-ring 與 .ai-glow 是兩個裁切框，各自裝一個比框還大的圓錐漸層在旋轉；
+   .ai-fill 是不透明的內底，蓋住中央之後，看到的就只剩邊框那一圈彩光與外圈光暈。 */
+.ai-ring,
+.ai-glow {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 17px;
+  pointer-events: none;
+}
+.ai-ring {
+  inset: -3px;
+}
+.ai-glow {
+  inset: -9px;
+  border-radius: 23px;
+  filter: blur(11px);
+  opacity: var(--ai-glow);
+}
+.ai-ring i,
+.ai-glow i {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: block;
+  width: 230%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  background: conic-gradient(from 0deg, var(--ai-ramp));
+  animation: ai-sweep 1.8s linear infinite;
+}
+.ai-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  background: var(--surface);
+  pointer-events: none;
+}
+/* 「邊框變粗」的做法：等待時把外殼自己的 1px 邊框藏起來，
+   由外圈那一圈彩光當邊框（inset -3px 剛好就是 3px 粗）。 */
+.ai-shell.busy {
+  border-color: transparent;
+}
+@keyframes ai-sweep {
+  to {
+    rotate: 360deg;
+  }
+}
+/* 輸入框內的「AI 推薦」按鈕：外殼裡的最後一個元素，位置就在傳送鍵左邊。 */
+.ai-suggest {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--tag-line);
+  border-radius: 999px;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.ai-suggest:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+.ai-suggest:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+/* 產生中改用淡紫，和「可以按」的粉色明顯區隔。 */
+.ai-suggest.busy {
+  border-color: transparent;
+  background: var(--tag-alt-bg);
+  color: var(--tag-alt-ink);
+  opacity: 1;
+}
+/* 其餘建議：輸入框上方的膠囊按鈕，點一下換掉輸入框內容。 */
+.ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ai-chips button {
+  max-width: 100%;
+  height: 34px;
+  padding: 0 14px;
+  overflow: hidden;
+  border: 1px solid var(--tag-line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--tag-ink);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ai-chips button:hover {
+  background: var(--primary-soft);
+}
+.ai-chips .ai-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+/* 傳送鍵：桌面版顯示「傳送」兩個字，手機版換成紙飛機圖示（見手機版面區塊）。 */
+.send-icon {
+  display: none;
+}
+/* 深色模式的光暈亮一點，才不會被深色背景吃掉。 */
+:root[data-theme="dark"] {
+  --ai-glow: 0.9;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 使用者要求減少動態時不轉圈，留下靜態彩邊當作等待中的提示。 */
+  .ai-ring i,
+  .ai-glow i {
+    animation: none;
+  }
 }
 .chat-placeholder {
   display: flex;
@@ -1957,9 +2193,6 @@ input[type="range"] {
   .message-input {
     padding: 16px;
   }
-  .message-input input {
-    min-height: 46px;
-  }
   .form-layout {
     grid-template-columns: 1fr;
   }
@@ -2023,6 +2256,42 @@ input[type="range"] {
 
 /* ---------- 640–1023：平板，側欄只留圖示 ---------- */
 @media (max-width: 1023px) {
+  /* 手機版面：按鈕全部只留圖示，文字收起來，把空間留給輸入的文字。 */
+  .message-input .ai-shell {
+    min-height: 46px;
+    padding-left: 14px;
+  }
+  .ai-suggest {
+    justify-content: center;
+    gap: 0;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+  }
+  .ai-suggest span {
+    display: none;
+  }
+  /* 傳送鍵換成紙飛機圖示的方形按鈕。 */
+  .message-input .button {
+    width: 46px;
+    min-height: 46px;
+    padding: 0;
+  }
+  .send-text {
+    display: none;
+  }
+  .send-icon {
+    display: block;
+  }
+  .ai-chips button {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
+  }
+  /* 手機版的跑光改用五彩（貼品牌的粉紫），不像桌面版那麼搶眼。 */
+  :root {
+    --ai-ramp: #c64d82, #e4749f, #9270b1, #6fa8ff, #4fe0c4, #c64d82;
+  }
   .sidebar {
     width: 84px;
     padding: 23px 20px 24px;
