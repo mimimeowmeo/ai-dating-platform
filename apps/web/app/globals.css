@@ -1749,8 +1749,8 @@ input[type="range"] {
 /* ── AI 推薦回覆（規格：docs/ai/REPLY-SUGGESTIONS-SPEC.md）───────────── */
 :root {
   /* 桌面版用七彩，最像「AI 正在運算」。 */
-  --ai-ramp: #ff5f8f, #ff9f45, #ffd447, #4fd39b, #3fb6ff, #7b7bff, #c46bff,
-    #ff5f8f;
+  --ai-ramp:
+    #ff5f8f, #ff9f45, #ffd447, #4fd39b, #3fb6ff, #7b7bff, #c46bff, #ff5f8f;
   /* 外圈光暈的濃度，深色模式會再亮一點。 */
   --ai-glow: 0.75;
 }

@@ -2501,7 +2501,11 @@ function Chat({
               onKeyDown={(e) => {
                 // 按 Enter 直接送出。中文輸入法選字時的 Enter 是「確認選字」，
                 // 那時 isComposing 為 true，不能當成送出，否則會把半形的注音送出去。
-                if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing)
+                if (
+                  e.key !== "Enter" ||
+                  e.shiftKey ||
+                  e.nativeEvent.isComposing
+                )
                   return;
                 e.preventDefault();
                 void submit(e);
