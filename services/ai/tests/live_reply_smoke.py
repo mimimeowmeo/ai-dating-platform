@@ -7,6 +7,7 @@
     .venv/bin/python -m tests.live_reply_smoke
 有 Ollama 設定時：測風格卡萃取、聊天室摘要，以及只用萃取模型產生推薦。
 有 GEMINI_API_KEY 時：再用預設的備援鏈（AI_REPLY_MODELS）產生推薦，並測 Gemini 向量化。
+產生推薦時會跑三種情境（見 run_suggestions）：聊天室已經有訊息、聊天室的第一則訊息、完全沒有資料根據。
 """
 
 import asyncio
@@ -85,30 +86,40 @@ async def check_ollama(settings: Settings):
 
 
 async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
-    """用一段固定的範例對話產生推薦並印出結果（B 剛問了「你週末都在幹嘛？」）。"""
-    request = ReplySuggestionRequest(
-        requestId="live-smoke",
-        requester=profile("阿明", bio="平常喜歡打羽球跟煮飯，最近想開始爬山", interests=["羽球", "料理"]),
-        partner=profile("小美", bio="喜歡爬山跟拍照，週末常往山上跑喔", interests=["登山", "攝影"]),
-        sharedTags=["戶外活動"],
-        recentMessages=[
-            chat("A", "嗨嗨，看到妳也喜歡爬山", 0),
-            chat("B", "對啊我超愛！", 1),
-            chat("B", "你週末都在幹嘛？", 1.5),
-        ],
-        partnerStyle=partner_card,
-        now=at(5),
-    )
-    started = time.perf_counter()
-    result = await suggester.generate(request)
-    print(f"耗時 {time.perf_counter() - started:.1f} 秒｜模型 {result.modelName}｜狀態 {result.status}｜模式 {result.mode}")
-    print(f"token：輸入 {result.usage.inputTokens}、輸出 {result.usage.outputTokens}、請求 {result.usage.requests} 次")
-    for item in result.suggestions:
-        print(f"  {item.rank}. [{item.styleTarget}/{item.intent}] {item.text}（風格距離 {item.styleDistance}）")
-    for item in result.rejected:
-        print(f"  （刪除：{item.reasonCode}）{item.text}")
-    if result.notice:
-        print("提示：", result.notice)
+    """用三種情境各產生一次推薦並印出結果，確認真的模型照規則走。
+
+    1. 聊天室已經有訊息（B 剛問了「你週末都在幹嘛？」）：整批 A 80%／B 20%，標 blend。
+    2. 聊天室還沒有任何訊息（要寫整個聊天室的第一則）：整批照 B 喜歡的樣子寫，標 partner。
+    3. 完全沒有資料根據（沒有訊息、沒有共同標籤、雙方只有暱稱與城市）：
+       不呼叫模型，直接回「沒有可推薦的句子」。
+    """
+    requester = profile("阿明", bio="平常喜歡打羽球跟煮飯，最近想開始爬山", interests=["羽球", "料理"])
+    partner = profile("小美", bio="喜歡爬山跟拍照，週末常往山上跑喔", interests=["登山", "攝影"])
+    conversation = [
+        chat("A", "嗨嗨，看到妳也喜歡爬山", 0),
+        chat("B", "對啊我超愛！", 1),
+        chat("B", "你週末都在幹嘛？", 1.5),
+    ]
+    rich = dict(requester=requester, partner=partner, sharedTags=["戶外活動"], partnerStyle=partner_card)
+    scenarios = [
+        ("聊天室已經有訊息（預期 A 80%／B 20%）", dict(rich, recentMessages=conversation)),
+        ("聊天室的第一則訊息（預期整批 B 100%）", dict(rich, recentMessages=[])),
+        ("完全沒有資料根據（預期不呼叫模型）", dict(requester=profile("阿明", city="台北"), partner=profile("小美", city="台北"))),
+    ]
+    for title, values in scenarios:
+        print(f"--- {title}", flush=True)
+        request = ReplySuggestionRequest(requestId="live-smoke", now=at(5), **values)
+        started = time.perf_counter()
+        result = await suggester.generate(request)
+        print(f"耗時 {time.perf_counter() - started:.1f} 秒｜模型 {result.modelName}｜狀態 {result.status}｜模式 {result.mode}")
+        print(f"寫法規則 {result.target.rule}／{result.target.source}（目標每則約 {round(result.target.stats.medianChars)} 字）")
+        print(f"token：輸入 {result.usage.inputTokens}、輸出 {result.usage.outputTokens}、請求 {result.usage.requests} 次")
+        for item in result.suggestions:
+            print(f"  {item.rank}. [{item.styleTarget}/{item.intent}] {item.text}（風格距離 {item.styleDistance}）")
+        for item in result.rejected:
+            print(f"  （刪除：{item.reasonCode}）{item.text}")
+        if result.notice:
+            print("提示：", result.notice)
 
 
 async def check_gemini(settings: Settings, partner_card) -> None:

@@ -3,7 +3,8 @@
 這裡全部是確定性的計算（不呼叫模型），對應規格 4.2、5.3、5.4：
 - compute_style_stats：從一個人的訊息算出寫法統計（字數、emoji、語助詞…）。
 - cold_start_card：沒有風格卡時，用 bio 做冷啟動。
-- resolve_targets：依混合比例算出第 1 則（B 100%）與其餘（A 80%／B 20%）的目標。
+- resolve_target：依「整個聊天室有沒有訊息」算出這一批 5 則共用的目標
+  （聊天室的第一則訊息 B 100%；有人傳過訊息之後 A 80%／B 20%）。
 - style_distance：一則候選離目標有多遠，用來排序。
 - partner_reactions：B 在這個聊天室對 A 各類訊息回得多熱絡。
 """
@@ -15,7 +16,7 @@ from datetime import timedelta
 from statistics import mean, median
 from typing import Literal, Sequence
 
-from .schemas import BlendConfig, ChatMessage, OwnMessage, ProfileSnapshot, StyleCard, StyleStats
+from .schemas import BlendConfig, ChatMessage, OwnMessage, ProfileSnapshot, StyleCard, StyleStats, StyleTarget
 from .textutil import (
     as_utc,
     count_emoji,
@@ -129,7 +130,7 @@ def stats_from_bio(bio: str, site: StyleStats) -> StyleStats:
 def blend_stats(base: StyleStats, other: StyleStats, other_weight: float) -> StyleStats:
     """把兩個人的寫法依比例混合：目標 = (1 − w) × base + w × other。
 
-    base 是 A、other 是 B：第 1 則 w = 1.0（完全用 B 的寫法），其餘預設 w = 0.2。
+    base 是 A、other 是 B：寫整個聊天室的第一則訊息時 w = 1.0（完全照 B），之後預設 w = 0.2。
     數值欄位做線性內插；語助詞把兩邊的比例加權後重新挑前幾名。
     """
     weight = max(0.0, min(1.0, other_weight))
@@ -209,7 +210,7 @@ def cold_start_card(profile: ProfileSnapshot, site: StyleStats, user_id: str | N
 
     - bio ≥ 10 字：信心 low、樣本來源 bio；數值用全站平均，語助詞參考 bio；bio 放進 bioSample
       讓 prompt 把它當寫法範例。
-    - bio < 10 字：信心 none、樣本來源 none；呼叫端會據此把第 1 則改用 A 的寫法。
+    - bio < 10 字：信心 none、樣本來源 none；呼叫端會據此改用 A 的寫法（見 resolve_target）。
     """
     bio = profile.bio.strip()
     if visible_chars(bio) >= MIN_BIO_CHARS:
@@ -236,22 +237,27 @@ def usable_card(card: StyleCard | None, profile: ProfileSnapshot, site: StyleSta
     return card
 
 
-def resolve_targets(
-    requester: StyleCard, partner: StyleCard, blend: BlendConfig
-) -> tuple[StyleStats, StyleStats, Literal["partner", "requester"]]:
-    """算出「第 1 則」與「其餘」的風格目標。
+def resolve_target(requester: StyleCard, partner: StyleCard, blend: BlendConfig, first_message: bool) -> StyleTarget:
+    """算出這一批 5 則共用的風格目標（規格 4.1、4.2；2026-09-23 使用者更正）。
 
-    - 第 1 則：A 與 B 依 firstPartnerWeight 混合（預設 1.0，也就是 B 100%）。
-    - 其餘：依 othersPartnerWeight 混合（預設 0.2，也就是 A 80%／B 20%）。
-    - B 的風格卡信心為 none（沒聊過天、bio 也太短）時，兩者都只用 A 的寫法，
-      並回報第 1 則的實際來源是 requester（規格 5.3）。
+    「第一則訊息」指的是整個聊天室的第一則訊息，不是 A 或 B 各自的第一則：
+    - first_message=True（聊天室還沒有任何訊息）：依 firstMessagePartnerWeight 混合，
+      預設 1.0，5 則全部照 B 喜歡的樣子寫，不像 A。
+    - first_message=False（只要有人傳過訊息，不論是誰）：依 laterPartnerWeight 混合，
+      預設 0.2，也就是 A 80%／B 20%。
+    - B 的風格卡信心為 none（沒聊過天、bio 也太短）：不論哪一種都只用 A 的寫法，
+      source 回報 requester（規格 5.3）。
+
+    source 依實際比例標示：權重 1 是 partner、0 是 requester、介於中間是 blend。
     """
+    rule: Literal["first_message", "later"] = "first_message" if first_message else "later"
     if partner.confidence == "none":
-        return requester.stats, requester.stats, "requester"
-    first = blend_stats(requester.stats, partner.stats, blend.firstPartnerWeight)
-    others = blend_stats(requester.stats, partner.stats, blend.othersPartnerWeight)
-    source: Literal["partner", "requester"] = "partner" if blend.firstPartnerWeight > 0 else "requester"
-    return first, others, source
+        return StyleTarget(rule=rule, source="requester", stats=requester.stats)
+    weight = blend.firstMessagePartnerWeight if first_message else blend.laterPartnerWeight
+    source: Literal["partner", "blend", "requester"] = (
+        "partner" if weight >= 1.0 else "requester" if weight <= 0.0 else "blend"
+    )
+    return StyleTarget(rule=rule, source=source, stats=blend_stats(requester.stats, partner.stats, weight))
 
 
 def classify_message_type(text: str) -> MessageType:

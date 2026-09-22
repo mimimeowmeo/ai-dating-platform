@@ -9,11 +9,23 @@ token 預算（規格 5.1）：整次請求約 9k tokens，其中 system prompt 
 
 from typing import Sequence
 
-from .schemas import ChatMessage, IndexMessage, Mode, ProfileSnapshot, ReplySuggestionRequest, StyleCard, StyleFacet, StyleStats
+from .schemas import (
+    ChatMessage,
+    IndexMessage,
+    Mode,
+    ProfileSnapshot,
+    ReplySuggestionRequest,
+    StyleCard,
+    StyleFacet,
+    StyleStats,
+    StyleTarget,
+)
 from .style import ReactionSummary
 from .textutil import estimate_tokens, single_line, taipei_label
 
-REPLY_PROMPT_VERSION = "reply-v1"
+# reply-v2（2026-09-23）：B 100% 只用在整個聊天室的第一則訊息，而且 5 則都照同一個寫法目標；
+# 模型不再標示 styleTarget；沒有依據時可以少給甚至不給（不硬湊）。
+REPLY_PROMPT_VERSION = "reply-v2"
 STYLE_MAP_PROMPT_VERSION = "style-map-v1"
 SUMMARY_PROMPT_VERSION = "summary-v1"
 
@@ -31,13 +43,18 @@ BLOCK_BUDGETS = {
 REPLY_INSTRUCTIONS = """你是交友 App「遇見」的聊天助手。你的工作是替使用者 A 擬幾則「可以直接傳給聊天對象 B 的訊息」讓 A 挑選；A 會自己決定要不要送出。
 
 【輸出】
-- 產生 5 則候選放在 suggestions。每則都是 A 要傳給 B 的一句話：只有一行、不換行、不加引號、不加編號。
+- 產生 5 則候選放在 suggestions（只有在找不到足夠依據時才少寫，見【不要硬湊】）。每則都是 A 要傳給 B 的一句話：只有一行、不換行、不加引號、不加編號。
 - 使用台灣繁體中文與台灣日常用語。
-- 第 1 則的 styleTarget 必須是 "partner"：照【第 1 則的寫法目標】寫，字數、emoji、語助詞、笑聲詞都貼近那個目標。
-- 其餘 4 則的 styleTarget 是 "blend"：照【其餘 4 則的寫法目標】寫，以 A 的寫法為主，只在語氣與話題上往 B 喜歡的方向微調。
-- intent 從 answer（回答）、question（提問）、callback（呼應以前聊過的事）、humor（幽默）、plan（邀約或推進）、share（分享自己）擇一；5 則盡量涵蓋不同用途。
+- 每一則都照【寫法目標】寫：字數、emoji、語助詞、笑聲詞都貼近那個目標。目標的標題會說明這次要像誰：
+  寫整個聊天室的第一則訊息時，完全照 B 喜歡的樣子寫、不要像 A；之後以 A 的寫法為主，只在語氣與話題上往 B 喜歡的方向微調。
+- intent 從 answer（回答）、question（提問）、callback（呼應以前聊過的事）、humor（幽默）、plan（邀約或推進）、share（分享自己）擇一；幾則之間盡量涵蓋不同用途。
 - priority 是推薦優先度（1 最推薦）。B 問了問題時，回答類最優先；對話剛開始時不要急著邀約。
 - reason 用一句話說明依據（例如「B 說週末去爬山」），30 字以內。
+
+【不要硬湊】
+- 每一則都要有具體依據：A 或 B 的檔案內容、共同標籤、對話內容、聊天室摘要、舊對話片段、B 的喜好。說不出依據的句子不要寫。
+- 資料裡通常有很多可以聊的點，請盡量寫滿 5 則；真的只找得到幾個依據時才少寫，完全找不到依據時 suggestions 回傳空陣列。
+- 不要為了湊數寫空泛的招呼或罐頭問句。
 
 【內容規則】
 - 不要捏造 A 的經歷、喜好或事實：只能用【A 的檔案】與 A 在對話中自己說過的內容；沒有依據時改用問句。
@@ -184,14 +201,20 @@ def format_chat_line(message: ChatMessage) -> str:
     return f"[{taipei_label(message.createdAt)}] {message.sender}：{single_line(message.content)}"
 
 
+# 【寫法目標】區塊的標題：依目標實際用了誰的寫法（StyleTarget.source）告訴模型這次要像誰。
+TARGET_TITLES: dict[str, str] = {
+    "partner": "聊天室的第一則訊息：每一則都完全照 B 喜歡的樣子寫，不要像 A",
+    "blend": "A 為主、帶一點 B",
+    "requester": "B 沒有足夠資料，改用 A 的寫法",
+}
+
+
 def build_reply_prompt(
     request: ReplySuggestionRequest,
     mode: Mode,
     requester_card: StyleCard,
     partner_card: StyleCard,
-    first_target: StyleStats,
-    others_target: StyleStats,
-    first_source: str,
+    target: StyleTarget,
     reactions: Sequence[ReactionSummary],
     recent: Sequence[ChatMessage],
 ) -> str:
@@ -200,6 +223,7 @@ def build_reply_prompt(
     區塊依重要程度排列，每塊都有自己的 token 上限（BLOCK_BUDGETS）；
     最後用剩下的預算從最新往回放入近期原文，確保最新的對話一定在裡面。
     recent 必須已依時間由舊到新排序。
+    寫法目標只有一個區塊：這一批 5 則共用同一個目標（見 style.resolve_target）。
     """
     blocks: list[str] = [f"【模式】{mode}：{MODE_GUIDANCE[mode]}"]
 
@@ -212,7 +236,6 @@ def build_reply_prompt(
     add("B 的檔案（聊天對象）", describe_profile(request.partner), "partner_profile")
     add("共同標籤", "、".join(request.sharedTags), "shared_tags")
     add("A 的寫法", describe_card_voice(requester_card), "requester_style")
-    first_owner = "B 的寫法" if first_source == "partner" else "B 沒有足夠資料，改用 A 的寫法"
     partner_parts = [describe_card_voice(partner_card)]
     facets = merge_facets(partner_card, request.partnerFacets)
     if facets:
@@ -220,8 +243,7 @@ def build_reply_prompt(
     if reactions:
         partner_parts.append("B 在這個聊天室的反應熱度（越高代表 B 越愛回這類訊息）：" + describe_reactions(reactions))
     add("B 的寫法與喜好", "\n".join(partner_parts), "partner_style")
-    blocks.append(f"【第 1 則的寫法目標（{first_owner}）】\n{describe_stats(first_target)}")
-    blocks.append(f"【其餘 4 則的寫法目標（A 為主、帶一點 B）】\n{describe_stats(others_target)}")
+    blocks.append(f"【寫法目標（{TARGET_TITLES[target.source]}）】\n{describe_stats(target.stats)}")
     add("聊天室摘要", request.conversationSummary or "", "summary")
     chunk_text = "\n---\n".join(
         (f"（{taipei_label(chunk.lastAt)}）\n" if chunk.lastAt else "") + chunk.content
