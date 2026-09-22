@@ -1661,10 +1661,17 @@ input[type="range"] {
 .message-input {
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 12px;
+  /* 直向排列：AI 建議按鈕列在上面，輸入框與傳送鍵在下面一列。 */
+  flex-direction: column;
+  gap: 10px;
   padding: 20px;
   border-top: 1px solid var(--line);
+}
+/* 輸入框與傳送鍵這一列，維持原本的水平排版。 */
+.composer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 .message-input .button {
   flex-shrink: 0;
@@ -1675,6 +1682,133 @@ input[type="range"] {
   left: 24px;
   color: var(--muted);
   font-size: 11px;
+}
+/* ── AI 推薦回覆（規格：docs/ai/REPLY-SUGGESTIONS-SPEC.md）───────────── */
+/* 跑光的角度做成可動畫的自訂屬性：瀏覽器會平滑補間這個角度，
+   不需要旋轉整個元素，也不會有裁切問題。不支援 @property 的舊瀏覽器
+   只會看到一圈不會轉的彩色邊框，功能不受影響。 */
+@property --ai-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+:root {
+  /* 桌面版用七彩，最像「AI 正在運算」。 */
+  --ai-ramp: #ff5f8f, #ff9f45, #ffd447, #4fd39b, #3fb6ff, #7b7bff, #c46bff,
+    #ff5f8f;
+  /* 外圈光暈的濃度，深色模式會再亮一點。 */
+  --ai-glow: 0.75;
+}
+/* 輸入框外殼：彩光畫在這一層，輸入框本身（不透明底色）蓋在上面，
+   中央被蓋住之後看到的就只剩外圈那一圈光。 */
+.ai-shell {
+  position: relative;
+  flex-grow: 1;
+  min-width: 0;
+}
+/* 輸入框疊在彩光之上，並讓出右側位置給「AI 推薦」按鈕。 */
+.ai-shell input {
+  position: relative;
+  z-index: 1;
+  padding-right: 120px;
+}
+/* 等待 API 時：::after 是那圈彩光，::before 是同一組顏色模糊後的光暈。 */
+.ai-shell.busy::after,
+.ai-shell.busy::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 17px;
+  background: conic-gradient(from var(--ai-angle), var(--ai-ramp));
+  animation: ai-sweep 1.8s linear infinite;
+}
+.ai-shell.busy::before {
+  inset: -9px;
+  border-radius: 23px;
+  filter: blur(11px);
+  opacity: var(--ai-glow);
+}
+/* 「邊框變粗」的做法：等待時把輸入框自己的 1px 邊框藏起來，
+   由外圈的彩光當邊框（inset -3px 剛好就是 3px 粗）。 */
+.ai-shell.busy input {
+  border-color: transparent;
+  background: var(--surface);
+}
+@keyframes ai-sweep {
+  to {
+    --ai-angle: 360deg;
+  }
+}
+/* 輸入框內的「AI 推薦」按鈕：靠右內縮 8px，位置就在傳送鍵左邊。 */
+.ai-suggest {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 8px;
+  translate: 0 -50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--tag-line);
+  border-radius: 999px;
+  background: var(--tag-bg);
+  color: var(--tag-ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.ai-suggest:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+.ai-suggest:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+/* 產生中改用淡紫，和「可以按」的粉色明顯區隔。 */
+.ai-suggest.busy {
+  border-color: transparent;
+  background: var(--tag-alt-bg);
+  color: var(--tag-alt-ink);
+  opacity: 1;
+}
+/* 其餘建議：輸入框上方的膠囊按鈕，點一下換掉輸入框內容。 */
+.ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.ai-chips button {
+  max-width: 100%;
+  height: 34px;
+  padding: 0 14px;
+  overflow: hidden;
+  border: 1px solid var(--tag-line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--tag-ink);
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ai-chips button:hover {
+  background: var(--primary-soft);
+}
+.ai-chips .ai-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+/* 深色模式的光暈亮一點，才不會被深色背景吃掉。 */
+:root[data-theme="dark"] {
+  --ai-glow: 0.9;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* 使用者要求減少動態時不轉圈，留下靜態彩邊當作等待中的提示。 */
+  .ai-shell.busy::after,
+  .ai-shell.busy::before {
+    animation: none;
+  }
 }
 .chat-placeholder {
   display: flex;
@@ -2366,6 +2500,28 @@ input[type="range"] {
   }
   .auth-form h1 {
     font-size: 27px;
+  }
+  /* AI 推薦回覆：手機版改用五彩（貼品牌粉紫），按鈕只留圖示不佔輸入空間。 */
+  :root {
+    --ai-ramp: #c64d82, #e4749f, #9270b1, #6fa8ff, #4fe0c4, #c64d82;
+  }
+  .ai-shell input {
+    padding-right: 52px;
+  }
+  .ai-suggest {
+    justify-content: center;
+    gap: 0;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+  }
+  .ai-suggest span {
+    display: none;
+  }
+  .ai-chips button {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -141,9 +141,9 @@ CI 定義於 `.github/workflows/ci.yml`。目前尚未初始化 Git 或連接 Gi
 | Phase 7 聊天           | 持久化訊息、Socket.IO、typing、presence、已讀、通知、重送去重                               |
 | AI 推薦回覆（AI 端）   | FastAPI `/internal/ai/*`、切片與向量、風格卡、摘要、話題區段、BullMQ worker                 |
 | AI 推薦回覆（後端）    | `POST /conversations/:id/reply-suggestions`、pgvector 檢索、訊息來源標記、背景工作與結果寫入 |
+| AI 推薦回覆（前端）    | 輸入框內的「AI 推薦」按鈕、等待時的彩光邊框、打字動畫、其餘建議的按鈕列                      |
 
-「AI 推薦回覆」的前端（按鈕、打字動畫、建議按鈕）尚未實作，規格見
-[AI 推薦回覆規格](docs/ai/REPLY-SUGGESTIONS-SPEC.md)。
+功能說明見 [AI 推薦回覆規格](docs/ai/REPLY-SUGGESTIONS-SPEC.md)。
 Phase 8–10 的其他推薦 AI、對話分析與持續學習尚未實作。Phase 1–7 的本機 MVP 未包含正式產品的電子郵件驗證、密碼重設、檢舉／內容審核、TLS、帳號刪除與隱私法遵驗收。
 
 ## 文件導讀

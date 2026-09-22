@@ -74,6 +74,29 @@ export type Match = {
   otherUser: Card;
   conversationId: string;
 };
+/**
+ * 一則 AI 推薦回覆。
+ * rank 1 會用打字動畫填進輸入框，其餘變成輸入框上方的按鈕。
+ * 送出訊息時把 id 當成 suggestionId 一起送，後端才能標記訊息來源（規格 5.6）。
+ */
+export type ReplySuggestion = {
+  id: string;
+  rank: number;
+  text: string;
+  intent: "answer" | "question" | "callback" | "humor" | "plan" | "share";
+};
+/**
+ * 按一次「AI 推薦回覆」的結果。
+ * status：ok（3～5 則）／partial（1～2 則，notice 會說明原因）／empty（0 則）。
+ * mode 是 AI 判斷的情境（開場、回覆、追問、重啟），前端只用來顯示提示語。
+ */
+export type ReplySuggestionResult = {
+  requestId: string;
+  status: "ok" | "partial" | "empty";
+  mode: "opener" | "reply" | "follow_up" | "revive";
+  notice: string | null;
+  suggestions: ReplySuggestion[];
+};
 export const useAuth = create<{
   token: string | null;
   user: User | null;
@@ -169,6 +192,18 @@ export async function api<T>(
 }
 export const send = <T>(path: string, body: unknown, method = "POST") =>
   api<T>(path, { method, body: JSON.stringify(body) });
+/**
+ * 向後端要一批 AI 推薦回覆。
+ *
+ * 後端會做權限檢查、讀近期訊息與雙方風格卡、用 pgvector 找相關的舊對話，
+ * 再呼叫 AI 服務並把結果存檔；AI 服務不可用時會丟出帶中文訊息的錯誤
+ * （例如「AI 忙碌中，請稍後再試。」），呼叫端直接顯示那句話即可。
+ */
+export const requestSuggestions = (conversationId: string) =>
+  send<ReplySuggestionResult>(
+    `/conversations/${conversationId}/reply-suggestions`,
+    {},
+  );
 export const intentLabels: Record<string, string> = {
   serious: "長期關係",
   casual: "輕鬆認識",

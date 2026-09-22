@@ -176,6 +176,27 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
       b.locator(".bubble", { hasText: "你好，這是一段真實的即時對話！" }),
     ).toBeVisible();
     await expect(a.getByText(/已讀/)).toBeVisible();
+    // AI 推薦回覆（用 b 這一頁測：a 裝了假時鐘，打字動畫的計時器不會照實際時間跑）。
+    const ai = b.getByRole("button", { name: "AI 推薦回覆" });
+    // 按鈕要在輸入框裡面，而不是跟傳送鍵並排在外面。
+    await expect(b.locator(".ai-shell .ai-suggest")).toBeVisible();
+    await ai.click();
+    // 等待期間輸入框會跑彩光（busy），兩顆按鈕都停用。
+    await expect(b.locator(".ai-shell")).toHaveClass(/busy/);
+    await expect(ai).toBeDisabled();
+    const chip = b.locator(".ai-chips button").first();
+    const failed = b.locator(".chat-panel .error");
+    // CI 的 compose 沒有 ai 服務，這時要如實顯示錯誤而不是卡住或假裝成功。
+    await expect(chip.or(failed)).toBeVisible({ timeout: 45000 });
+    const box = b.getByRole("textbox", { name: "訊息內容" });
+    if (await chip.isVisible()) {
+      // 有建議時：第 1 則會被打字填進輸入框，點上方的按鈕可以換成另一則。
+      await expect(box).not.toHaveValue("");
+      const other = ((await chip.textContent()) ?? "").trim();
+      await chip.click();
+      await expect(box).toHaveValue(other);
+      await box.fill("");
+    }
     await a.reload();
     await expect(a.getByText(/已讀/)).toBeVisible();
     const renewed = a.waitForResponse(

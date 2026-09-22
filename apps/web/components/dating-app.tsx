@@ -28,6 +28,7 @@ import {
   MapPin,
   MessageCircle,
   Moon,
+  RefreshCw,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -38,6 +39,7 @@ import {
 import {
   api,
   refresh,
+  requestSuggestions,
   send,
   useAuth,
   genderLabels,
@@ -47,6 +49,7 @@ import {
   type Match,
   type Conversation,
   type Message,
+  type ReplySuggestion,
   type User,
 } from "@/lib/api";
 import { HeartIcon, LogoMark } from "@/components/icons";
@@ -2110,9 +2113,24 @@ function Chat({
   const [hasOlder, setHasOlder] = useState(true);
   const [showProfile, setShowProfile] = useState(false);
   const end = useRef<HTMLDivElement>(null);
-  const draft = useRef<{ content: string; clientId: string } | null>(null);
+  const draft = useRef<{
+    content: string;
+    clientId: string;
+    suggestionId?: string;
+  } | null>(null);
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTyping = useRef(0);
+  // ── AI 推薦回覆（docs/ai/REPLY-SUGGESTIONS-SPEC.md）──────────────────
+  // 第 1 則會打字填進輸入框，這裡放的是「其餘建議」，顯示成輸入框上方的按鈕。
+  const [suggestions, setSuggestions] = useState<ReplySuggestion[]>([]);
+  // 等後端回應的期間：輸入框邊框跑彩光，AI 鈕與傳送鍵都停用。
+  const [suggesting, setSuggesting] = useState(false);
+  // 不足 3 則時後端會附一句說明（規格 4.1：顯示剩下的就好，不硬湊）。
+  const [notice, setNotice] = useState("");
+  // 目前輸入框的內容來自哪一則推薦；送出時一起帶給後端判斷訊息來源（規格 5.6）。
+  const suggestionId = useRef<string | null>(null);
+  // 打字動畫的計時器；使用者自己打字、送出或離開聊天室時都要清掉。
+  const typer = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
     const saved = c.otherLastReadAt;
     if (saved) setReadAt((current) => (current > saved ? current : saved));
@@ -2142,6 +2160,8 @@ function Chat({
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [messages.length]);
+  // 切換聊天室或離開頁面時停掉打字動畫，計時器不會在元件消失後繼續跑。
+  useEffect(() => () => stopTyping(), [c.id]);
   useEffect(() => {
     const markRead = () => {
       if (document.visibilityState === "visible")
@@ -2217,6 +2237,65 @@ function Chat({
       if (typingTimer.current) clearTimeout(typingTimer.current);
     };
   }, [c.id, otherId, socket, client]);
+  /**
+   * 停掉打字動畫。
+   * 使用者自己打字、送出訊息或離開聊天室時都要呼叫；
+   * 不停掉的話計時器會繼續往輸入框塞字，把使用者打到一半的內容蓋掉。
+   */
+  function stopTyping() {
+    if (typer.current) clearInterval(typer.current);
+    typer.current = null;
+  }
+  /**
+   * 把第 1 則推薦用打字動畫填進輸入框（每 40 毫秒一個字）。
+   *
+   * 同時記下這則推薦的 id：即使使用者之後改了幾個字，送出時仍然會帶著它，
+   * 由後端比對相似度決定 ai_verbatim／ai_edited／human（規格 5.6）。
+   */
+  function typeIn(text: string, id: string) {
+    stopTyping();
+    suggestionId.current = id;
+    setContent("");
+    let shown = 0;
+    typer.current = setInterval(() => {
+      shown += 1;
+      setContent(text.slice(0, shown));
+      if (shown >= text.length) stopTyping();
+    }, 40);
+  }
+  /**
+   * 點了輸入框上方的建議按鈕：直接換掉輸入框內容（不跑打字動畫），
+   * 並把來源換成這一則推薦。
+   */
+  function applySuggestion(suggestion: ReplySuggestion) {
+    stopTyping();
+    suggestionId.current = suggestion.id;
+    setContent(suggestion.text);
+  }
+  /**
+   * 按下輸入框裡的「AI 推薦」：向後端要一批建議。
+   *
+   * 成功：第 1 則打字填入輸入框，其餘變成上方的按鈕；按鈕會變成「換一批」，
+   * 再按一次後端會避開同一情境下已經給過的句子。
+   * 失敗：顯示後端回來的中文訊息（例如「AI 忙碌中，請稍後再試。」），輸入框內容不動。
+   */
+  async function askAi() {
+    if (suggesting || closed) return;
+    setSuggesting(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await requestSuggestions(c.id);
+      const [first, ...rest] = result.suggestions;
+      setSuggestions(rest);
+      setNotice(result.notice || "");
+      if (first) typeIn(first.text, first.id);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSuggesting(false);
+    }
+  }
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!content.trim() || busy || closed) return;
@@ -2226,6 +2305,8 @@ function Chat({
       draft.current = {
         content: content.trim(),
         clientId: crypto.randomUUID(),
+        // 這則訊息是從哪一則 AI 推薦來的；沒有用推薦就不送這個欄位。
+        ...(suggestionId.current ? { suggestionId: suggestionId.current } : {}),
       };
     try {
       const message = await send<Message>(
@@ -2235,6 +2316,11 @@ function Chat({
       merge([message]);
       setContent("");
       draft.current = null;
+      // 送出後收起這一批建議：對話已經往前走，舊建議不再適用（要新的就再按一次）。
+      stopTyping();
+      suggestionId.current = null;
+      setSuggestions([]);
+      setNotice("");
       socket?.emit("typing", { conversationId: c.id, isTyping: false });
       await client.invalidateQueries({ queryKey: ["/conversations"] });
     } catch (e) {
@@ -2341,30 +2427,78 @@ function Chat({
         <div className="typing-line" aria-live="polite">
           {typing ? "對方正在輸入…" : closed ? "這段對話已結束。" : ""}
         </div>
-        <input
-          aria-label="訊息內容"
-          placeholder="輸入訊息..."
-          value={content}
-          maxLength={2000}
-          disabled={closed}
-          onChange={(e) => {
-            setContent(e.target.value);
-            if (Date.now() - lastTyping.current > 1200) {
-              socket?.emit("typing", {
-                conversationId: c.id,
-                isTyping: !!e.target.value,
-              });
-              lastTyping.current = Date.now();
-            }
-          }}
-        />
-        <button
-          className="button"
-          aria-label="傳送訊息"
-          disabled={busy || !content.trim() || closed}
-        >
-          傳送
-        </button>
+        {(suggestions.length > 0 || notice) && (
+          <div className="ai-chips" aria-live="polite">
+            {suggestions.map((s) => (
+              // 點一下就把這一則換進輸入框；title 讓太長被截斷時仍看得到全文。
+              <button
+                key={s.id}
+                type="button"
+                title={s.text}
+                onClick={() => applySuggestion(s)}
+              >
+                {s.text}
+              </button>
+            ))}
+            {notice && <span className="ai-note">{notice}</span>}
+          </div>
+        )}
+        <div className="composer-row">
+          {/* busy 時這層會畫出繞行的彩光，輸入框蓋在上面，只露出外圈。 */}
+          <div className={suggesting ? "ai-shell busy" : "ai-shell"}>
+            <input
+              aria-label="訊息內容"
+              placeholder="輸入訊息..."
+              value={content}
+              maxLength={2000}
+              disabled={closed}
+              onChange={(e) => {
+                // 使用者自己打字就中斷打字動畫；清空輸入框等於放棄這則推薦。
+                stopTyping();
+                if (!e.target.value) suggestionId.current = null;
+                setContent(e.target.value);
+                if (Date.now() - lastTyping.current > 1200) {
+                  socket?.emit("typing", {
+                    conversationId: c.id,
+                    isTyping: !!e.target.value,
+                  });
+                  lastTyping.current = Date.now();
+                }
+              }}
+            />
+            {/* type="button"：它在 form 裡面，不加會變成送出訊息。 */}
+            <button
+              type="button"
+              className={suggesting ? "ai-suggest busy" : "ai-suggest"}
+              aria-label="AI 推薦回覆"
+              disabled={suggesting || closed}
+              onClick={askAi}
+            >
+              {suggesting ? (
+                <Loader2 size={15} className="spin" />
+              ) : suggestions.length ? (
+                <RefreshCw size={15} />
+              ) : (
+                <Sparkles size={15} />
+              )}
+              {/* 手機版只留圖示，這段文字會被 CSS 收起來。 */}
+              <span>
+                {suggesting
+                  ? "產生中"
+                  : suggestions.length
+                    ? "換一批"
+                    : "AI 推薦"}
+              </span>
+            </button>
+          </div>
+          <button
+            className="button"
+            aria-label="傳送訊息"
+            disabled={busy || suggesting || !content.trim() || closed}
+          >
+            傳送
+          </button>
+        </div>
       </form>
       {showProfile && (
         <PersonDialog
