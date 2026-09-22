@@ -29,6 +29,7 @@ import {
   MessageCircle,
   Moon,
   RefreshCw,
+  Send,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -2496,7 +2497,9 @@ function Chat({
             aria-label="傳送訊息"
             disabled={busy || suggesting || !content.trim() || closed}
           >
-            傳送
+            {/* 手機版只留紙飛機圖示，桌面版維持「傳送」兩個字（由 CSS 切換）。 */}
+            <Send className="send-icon" size={18} aria-hidden="true" />
+            <span className="send-text">傳送</span>
           </button>
         </div>
       </form>

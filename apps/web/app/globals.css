@@ -1608,14 +1608,19 @@ input[type="range"] {
 }
 .message-body {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
+  /* 時間排在氣泡旁邊（自己的訊息在左、對方的在右），並與氣泡底部對齊。 */
+  align-items: flex-end;
+  gap: 8px;
   min-width: 0;
-  max-width: 45%;
+  /* 時間改成跟氣泡同一列之後，整體寬度放寬一點，氣泡才不會被擠得太窄。 */
+  max-width: 58%;
+}
+/* 自己的訊息氣泡靠右，所以時間翻到氣泡左邊。 */
+.message.own .message-body {
+  flex-direction: row-reverse;
 }
 .message:not(.own) .message-body {
-  max-width: calc(45% - 22px);
+  max-width: calc(58% - 22px);
 }
 .bubble {
   max-width: 100%;
@@ -1629,9 +1634,18 @@ input[type="range"] {
 }
 .message small {
   display: flex;
+  /* 時間貼齊氣泡底線，長訊息換行時才不會飄到中間。 */
   align-items: center;
+  align-self: flex-end;
+  flex-shrink: 0;
   gap: 4px;
+  padding-bottom: 2px;
   color: var(--muted);
+  white-space: nowrap;
+}
+/* 氣泡本身可以縮，時間永遠看得到。 */
+.message-body > .bubble {
+  min-width: 0;
 }
 .message.own {
   justify-content: flex-end;
@@ -1699,18 +1713,42 @@ input[type="range"] {
   /* 外圈光暈的濃度，深色模式會再亮一點。 */
   --ai-glow: 0.75;
 }
-/* 輸入框外殼：彩光畫在這一層，輸入框本身（不透明底色）蓋在上面，
-   中央被蓋住之後看到的就只剩外圈那一圈光。 */
+/* 輸入框外殼：長得就是原本那個輸入框（邊框、底色、圓角），
+   真正的 <input> 與 AI 按鈕都是它裡面的一列，
+   所以再長的文字也不會被按鈕蓋住（之前用 padding 讓位，長字仍會被壓到）。
+   彩光畫在這一層的偽元素上，外殼本身是不透明底色，中央被蓋住後只剩外圈一圈光。 */
 .ai-shell {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-grow: 1;
   min-width: 0;
+  min-height: 52px;
+  padding: 0 8px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--page);
 }
-/* 輸入框疊在彩光之上，並讓出右側位置給「AI 推薦」按鈕。 */
-.ai-shell input {
+/* 外殼已經有邊框與內距，裡面的 input 只負責文字。 */
+.message-input .ai-shell input {
   position: relative;
   z-index: 1;
-  padding-right: 120px;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+/* 焦點框改畫在外殼上，看起來才是「整個輸入框被選取」。 */
+.message-input .ai-shell input:focus-visible {
+  outline: none;
+}
+.ai-shell:focus-within {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 /* 等待 API 時：::after 是那圈彩光，::before 是同一組顏色模糊後的光暈。 */
 .ai-shell.busy::after,
@@ -1728,9 +1766,9 @@ input[type="range"] {
   filter: blur(11px);
   opacity: var(--ai-glow);
 }
-/* 「邊框變粗」的做法：等待時把輸入框自己的 1px 邊框藏起來，
+/* 「邊框變粗」的做法：等待時把外殼自己的 1px 邊框藏起來，
    由外圈的彩光當邊框（inset -3px 剛好就是 3px 粗）。 */
-.ai-shell.busy input {
+.ai-shell.busy {
   border-color: transparent;
   background: var(--surface);
 }
@@ -1739,13 +1777,11 @@ input[type="range"] {
     --ai-angle: 360deg;
   }
 }
-/* 輸入框內的「AI 推薦」按鈕：靠右內縮 8px，位置就在傳送鍵左邊。 */
+/* 輸入框內的「AI 推薦」按鈕：外殼裡的最後一個元素，位置就在傳送鍵左邊。 */
 .ai-suggest {
-  position: absolute;
+  position: relative;
   z-index: 2;
-  top: 50%;
-  right: 8px;
-  translate: 0 -50%;
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1798,6 +1834,10 @@ input[type="range"] {
 .ai-chips .ai-note {
   color: var(--muted);
   font-size: 12px;
+}
+/* 傳送鍵：桌面版顯示「傳送」兩個字，手機版換成紙飛機圖示（見手機版面區塊）。 */
+.send-icon {
+  display: none;
 }
 /* 深色模式的光暈亮一點，才不會被深色背景吃掉。 */
 :root[data-theme="dark"] {
@@ -2091,9 +2131,6 @@ input[type="range"] {
   .message-input {
     padding: 16px;
   }
-  .message-input input {
-    min-height: 46px;
-  }
   .form-layout {
     grid-template-columns: 1fr;
   }
@@ -2157,6 +2194,42 @@ input[type="range"] {
 
 /* ---------- 640–1023：平板，側欄只留圖示 ---------- */
 @media (max-width: 1023px) {
+  /* 手機版面：按鈕全部只留圖示，文字收起來，把空間留給輸入的文字。 */
+  .message-input .ai-shell {
+    min-height: 46px;
+    padding-left: 14px;
+  }
+  .ai-suggest {
+    justify-content: center;
+    gap: 0;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+  }
+  .ai-suggest span {
+    display: none;
+  }
+  /* 傳送鍵換成紙飛機圖示的方形按鈕。 */
+  .message-input .button {
+    width: 46px;
+    min-height: 46px;
+    padding: 0;
+  }
+  .send-text {
+    display: none;
+  }
+  .send-icon {
+    display: block;
+  }
+  .ai-chips button {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 12px;
+  }
+  /* 手機版的跑光改用五彩（貼品牌的粉紫），不像桌面版那麼搶眼。 */
+  :root {
+    --ai-ramp: #c64d82, #e4749f, #9270b1, #6fa8ff, #4fe0c4, #c64d82;
+  }
   .sidebar {
     width: 84px;
     padding: 23px 20px 24px;
@@ -2500,28 +2573,6 @@ input[type="range"] {
   }
   .auth-form h1 {
     font-size: 27px;
-  }
-  /* AI 推薦回覆：手機版改用五彩（貼品牌粉紫），按鈕只留圖示不佔輸入空間。 */
-  :root {
-    --ai-ramp: #c64d82, #e4749f, #9270b1, #6fa8ff, #4fe0c4, #c64d82;
-  }
-  .ai-shell input {
-    padding-right: 52px;
-  }
-  .ai-suggest {
-    justify-content: center;
-    gap: 0;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-  }
-  .ai-suggest span {
-    display: none;
-  }
-  .ai-chips button {
-    height: 32px;
-    padding: 0 12px;
-    font-size: 12px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
