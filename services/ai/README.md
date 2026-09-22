@@ -1,4 +1,10 @@
-# AI 服務（Phase 1–7）
+# AI 服務
+
+包含兩個功能：
+- **真人驗證**（Phase 1–7，本文件前半）。
+- **AI 推薦回覆**（本文件最後的「AI 推薦回覆」一節；完整規格見 [REPLY-SUGGESTIONS-SPEC](../../docs/ai/REPLY-SUGGESTIONS-SPEC.md)）。
+
+依 [ADR 0002](../../docs/architecture/adr/0002-db-ownership.md)，AI 服務不連資料庫，只做運算。
 
 提供私有 FastAPI 真人驗證介面與實際消費 Redis BullMQ 的 Python worker。預設沒有辨識模型；有效影像回 `unavailable / MODEL_NOT_CONFIGURED`，不會因為格式正確、存在人臉或開發模式而標為 `verified`。目前完成的是可接模型、可測試的服務邊界，**尚未完成真實模型的真人驗證驗收**。
 
@@ -83,3 +89,65 @@ Provider 除了上述 API 欄位，還必須回：
 - 尚未選定真人辨識模型、尚未驗證其準確率與實際活體流程；Node producer 與 Python consumer 的互通測試仍待產品後端完成。
 
 官方 BullMQ Python 文件：<https://docs.bullmq.io/python/introduction>。
+
+## AI 推薦回覆
+
+程式在 `app/reply/`，每個模組開頭都有中文說明，每個函式都有註解。
+
+### 執行
+
+```sh
+.venv/bin/python -m uvicorn app.main:app --port 8000 --no-access-log   # API（與真人驗證同一個程序）
+.venv/bin/python -m app.reply.worker                                  # 背景 worker（queue ai-jobs → ai-results）
+.venv/bin/python -m app.reply.worker_health                           # worker 健康檢查
+REDIS_URL=redis://127.0.0.1:6379/0 .venv/bin/python -m tests.integration_reply_queue
+```
+
+- 背景萃取預設用 **Ollama Cloud**：`OLLAMA_BASE_URL=https://ollama.com/v1`、`OLLAMA_API_KEY`、`AI_EXTRACTION_MODELS=ollama:gemma4:31b`。
+- 想離線開發時才用本機 Ollama：請安裝**原生 App**（Mac 的 Docker 用不到 GPU），`OLLAMA_BASE_URL=http://localhost:11434/v1`；
+  AI 服務跑在容器裡時改用 `http://host.docker.internal:11434/v1`。雲端用 `ollama/ollama` 容器，網址 `http://ollama:11434/v1`。
+- 容器的 worker 指令覆寫為 `python -m app.reply.worker`，healthcheck 為 `python -m app.reply.worker_health`。
+
+### 環境變數
+
+| 名稱 | 預設 | 用途 |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | （空） | Google AI Studio 的 key；也接受 `GOOGLE_API_KEY` |
+| `AI_REPLY_MODELS` | `ollama:gemma4:31b,gemini-3.8-flash` | 線上推薦的備援鏈（依序嘗試）；設成 `-` 代表停用 |
+| `AI_REPLY_MODEL_TIMEOUT_SECONDS` | `12` | 備援鏈中每個模型各自的逾時，太慢就換下一個 |
+| `AI_REPLY_THINKING_LEVEL` | `LOW` | Gemini 3.x Flash 的思考程度 |
+| `AI_EXTRACTION_MODELS` | `ollama:gemma4:31b` | 背景萃取（摘要、風格卡）的模型鏈 |
+| `OLLAMA_BASE_URL` | （空） | Ollama 的 OpenAI 相容端點；Ollama Cloud 用 `https://ollama.com/v1`；沒有 `/v1` 會自動補上 |
+| `OLLAMA_API_KEY` | （空） | 只有 Ollama Cloud 需要；雲端模型名稱用 `/api/tags` 列出的名字（例：`ollama:gemma4:31b`） |
+| `AI_EMBEDDING_MODEL` | `gemini-embedding-2` | 向量模型；所有向量必須同一個模型 |
+| `AI_EMBEDDING_DIMENSIONS` | `768` | 與 pgvector 的 `vector(768)` 一致 |
+| `AI_LLM_TIMEOUT_SECONDS` | `25` | 線上推薦整次請求（含備援與重試）的總逾時；也是向量化每批的逾時 |
+| `AI_EXTRACTION_TIMEOUT_SECONDS` | `180` | 背景萃取每次模型呼叫的逾時 |
+
+### 內部 API（都需要 `X-Internal-Token`）
+
+| 路徑 | 用途 |
+| --- | --- |
+| `POST /internal/ai/reply-suggestions` | 產生 3～5 則推薦（第 1 則 B 100%，其餘 A 80%／B 20%） |
+| `POST /internal/ai/embed` | 文字轉向量（`purpose`: `query`／`document`） |
+| `POST /internal/ai/chunks` | 對話切片（30 分鐘／12 則／400 tokens／重疊 2 則），可一併向量化 |
+| `POST /internal/ai/topic-spans` | 找出 AI 推薦開啟的話題區段 |
+| `POST /internal/ai/conversation-summary` | 更新聊天室摘要（Ollama） |
+| `POST /internal/ai/style-profile` | 萃取風格卡（Ollama＋向量化） |
+
+請求與回應格式以 `app/reply/schemas.py` 為準。可預期的錯誤回 503 與固定代碼
+（`LLM_NOT_CONFIGURED`、`LLM_UNAVAILABLE`、`EMBEDDING_*`、`EXTRACTION_*`）；格式錯誤回 422 且不回顯輸入。
+
+### 背景工作
+
+- Queue `ai-jobs`，job 名稱：`chunk-embed`、`topic-spans`、`summarize`、`build-style`；job data 與對應 HTTP 請求相同。
+- 結果放進 queue `ai-results`（同名 job），資料為 `{sourceJobId, name, key, result}`，由 NestJS 取出寫入資料庫。
+- 失敗時丟出固定代碼，錯誤紀錄不含聊天內容；worker concurrency 為 1（萃取模型一次處理一個請求）。
+
+### 測試
+
+- `tests/test_reply_*.py`：63 項單元測試，全部用 Pydantic AI 的 `FunctionModel` 與假的向量服務，**不會連網、不花額度**。
+- `tests/live_reply_smoke.py`：手動執行、會呼叫**真的模型**（Ollama／Gemini，依 `.env` 設定），用來確認模型真的接上；不會被自動執行。
+- `tests/integration_reply_queue.py`：真實 Redis 的 BullMQ 串接測試（用唯一 queue 名稱，結束時只清掉自己的 queue）。
+- 2026-09-23 本機 Python 3.14：87 項單元測試（含真人驗證 24 項）與 Redis 整合測試全數通過；
+  `live_reply_smoke.py` 實測 Ollama Cloud（gemma4:31b）與 Gemini 向量化正常。
