@@ -74,8 +74,10 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET:-heartlink-media}
       JWT_SECRET: ${JWT_SECRET:?請執行 pnpm setup}
-      # 同一個 compose 網路用服務名連線；ai 沒起來時 AI 功能回 503，其他功能照常。
-      AI_INTERNAL_URL: ${AI_INTERNAL_URL:-http://ai:8000}
+      # 固定用服務名連線（同 S3_ENDPOINT 的做法）：.env 裡的 AI_INTERNAL_URL 是給
+      # 本機 pnpm dev 用的 127.0.0.1，帶進容器會連到容器自己而失敗。
+      # ai 沒起來時 AI 功能回 503 固定代碼，其他功能照常。
+      AI_INTERNAL_URL: http://ai:8000
       AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
