@@ -84,7 +84,7 @@ def create_app(
             "status": "ok",
             "service": "ai",
             "verificationProvider": "configured" if settings.provider_configured else "unavailable",
-            # 只回報「有沒有設定」，不實際呼叫模型；額度是否足夠要看 AI Studio。
+            # 只回報「有沒有設定」，不實際呼叫模型；額度是否足夠要到 Ollama／AI Studio 的帳號頁面查看。
             "replySuggestions": replies.health(),
         }
 
