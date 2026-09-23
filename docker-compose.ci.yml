@@ -115,7 +115,14 @@ services:
     restart: unless-stopped
     ports: ["127.0.0.1:${APP_PORT:-8080}:80"]
     volumes:
-      ["./infrastructure/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro"]
+      - ./infrastructure/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # 採信哪個來源 IP（影響登入／註冊限流），見 infrastructure/nginx/client-ip/。
+      # 值打錯時直接啟動失敗，不會默默建出空目錄。
+      - type: bind
+        source: ./infrastructure/nginx/client-ip/${NGINX_CLIENT_IP:-direct}.conf
+        target: /etc/nginx/conf.d/client-ip.conf
+        read_only: true
+        bind: { create_host_path: false }
     depends_on:
       api: { condition: service_healthy }
       web: { condition: service_healthy }

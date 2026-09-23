@@ -23,6 +23,7 @@ import {
   AuthGuard,
   AuthRequest,
 } from "./core";
+import { ipBucket } from "./ip-bucket";
 const credentials = z
   .object({
     email: z
@@ -193,10 +194,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     this.auth.checkOrigin(req);
-    return this.cookie(
-      res,
-      await this.auth.register(body, req.ip || "unknown"),
-    );
+    return this.cookie(res, await this.auth.register(body, ipBucket(req.ip)));
   }
   @Post("login") async login(
     @Body() body: unknown,
@@ -204,14 +202,14 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     this.auth.checkOrigin(req);
-    return this.cookie(res, await this.auth.login(body, req.ip || "unknown"));
+    return this.cookie(res, await this.auth.login(body, ipBucket(req.ip)));
   }
   @Post("refresh") async refresh(
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
     this.auth.checkOrigin(req);
-    await this.infra.limit(`refresh:${req.ip}`, 60, 60);
+    await this.infra.limit(`refresh:${ipBucket(req.ip)}`, 60, 60);
     return this.cookie(
       res,
       await this.auth.refresh(req.cookies?.dating_refresh),
