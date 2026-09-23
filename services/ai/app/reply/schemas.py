@@ -188,10 +188,16 @@ class RetrievedChunk(ApiModel):
 
 
 class BlendConfig(ApiModel):
-    """風格混合比例：B 的權重。預設第 1 則 1.0（B 100%）、其餘 0.2（A 80%／B 20%）。"""
+    """風格混合比例：B 的權重（0＝完全照 A 的寫法，1＝完全照 B 喜歡的樣子）。規格 4.1、4.2。
 
-    firstPartnerWeight: Ratio = 1.0
-    othersPartnerWeight: Ratio = 0.2
+    一批 5 則推薦共用同一個比例，而且只看「整個聊天室」有沒有訊息，跟是誰傳的無關：
+    - firstMessagePartnerWeight：聊天室還沒有任何訊息、要寫整個聊天室的第一則訊息時用，
+      預設 1.0（B 100%）。
+    - laterPartnerWeight：只要有人傳過訊息（A 或 B 都算），之後一律用這個，預設 0.2（A 80%／B 20%）。
+    """
+
+    firstMessagePartnerWeight: Ratio = 1.0
+    laterPartnerWeight: Ratio = 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +236,12 @@ class ReplySuggestionRequest(ApiModel):
 
 
 class Suggestion(ApiModel):
-    """一則推薦。rank 1 會被前端以打字動畫填入輸入框，其餘變成按鈕。"""
+    """一則推薦。rank 1 會被前端以打字動畫填入輸入框，其餘變成按鈕。
+
+    styleTarget 是這一批共用的寫法規則（同一批 5 則都一樣）：
+    - partner：要寫整個聊天室的第一則訊息，照 B 喜歡的樣子寫（B 100%）。
+    - blend：其他情況，也就是 A 80%／B 20%；B 沒有足夠資料時只用 A 的寫法，也標成 blend。
+    """
 
     rank: Annotated[int, Field(ge=1, le=5)]
     text: Annotated[str, Field(min_length=1, max_length=200)]
@@ -255,19 +266,26 @@ class UsageInfo(ApiModel):
     requests: int = 0
 
 
-class StyleTargets(ApiModel):
-    """這次使用的風格目標；firstSource 表示第 1 則實際用了誰的寫法（B 沒資料時退回 A）。"""
+class StyleTarget(ApiModel):
+    """這一批 5 則共用的風格目標（由 style.resolve_target 算出）。
 
-    first: StyleStats
-    others: StyleStats
-    firstSource: Literal["partner", "requester"]
+    - rule：套用了哪一條規則。first_message＝聊天室還沒有任何訊息；later＝已經有人傳過訊息。
+    - source：目標實際用了誰的寫法。partner＝B 喜歡的樣子；blend＝A 為主、帶一點 B；
+      requester＝B 沒有足夠資料（沒聊過天、bio 也太短），只用 A 的寫法（規格 5.3）。
+    - stats：數值目標本身（字數、emoji、語助詞…），排序時用來算每則候選的風格距離。
+    """
+
+    rule: Literal["first_message", "later"]
+    source: Literal["partner", "blend", "requester"]
+    stats: StyleStats
 
 
 class ReplySuggestionResponse(ApiModel):
     """產生推薦的結果。
 
-    status：ok（3～5 則）／partial（1～2 則，notice 會說明）／empty（0 則）。
-    modelName 是實際回應的模型（備援鏈中哪一個成功）。
+    status：ok（3～5 則）／partial（1～2 則，notice 會說明）／empty（0 則，notice 是「沒有可推薦的句子」）。
+    modelName 是實際回應的模型（備援鏈中哪一個成功）；完全沒有資料根據、沒有呼叫模型時是 None，
+    這時 usage 也全是 0。
     """
 
     requestId: str
@@ -279,7 +297,7 @@ class ReplySuggestionResponse(ApiModel):
     modelName: str | None = None
     promptVersion: str
     usage: UsageInfo
-    targets: StyleTargets
+    target: StyleTarget
 
 
 # ---------------------------------------------------------------------------
@@ -441,19 +459,27 @@ class StyleProfileResponse(ApiModel):
 
 
 class DraftSuggestion(LlmModel):
-    """模型產生的一則候選。styleTarget=partner 代表用 B 的寫法寫（要給第 1 則用）。"""
+    """模型產生的一則候選。
+
+    寫法規則（B 100% 或 A 80%／B 20%）由程式依聊天室有沒有訊息決定，模型不用標示；
+    模型如果照舊版格式多吐 styleTarget，LlmModel 會直接忽略。
+    """
 
     text: Annotated[str, Field(min_length=1, max_length=300)]
     intent: Intent
     priority: Annotated[int, Field(ge=1, le=5)]
-    styleTarget: Literal["partner", "blend"]
     reason: Annotated[str, Field(max_length=200)] = ""
 
 
 class DraftBatch(LlmModel):
-    """模型一次產生的候選清單；要求 5 則，接受 3～6 則，不足 3 則會觸發重試。"""
+    """模型一次產生的候選清單：最多 5 則（容許 6 則），沒有依據時可以少於 5 則，甚至 0 則。
 
-    suggestions: list[DraftSuggestion] = Field(min_length=3, max_length=6)
+    刻意不設下限：以前要求至少 3 則、不足就重試，等於逼模型硬湊空泛的句子。
+    現在找不到依據就回空清單，前端直接顯示「沒有可推薦的句子」（規格 4.1）。
+    超過 6 則才算格式錯誤，會請模型重寫。
+    """
+
+    suggestions: list[DraftSuggestion] = Field(max_length=6)
 
 
 class TopicHeat(LlmModel):

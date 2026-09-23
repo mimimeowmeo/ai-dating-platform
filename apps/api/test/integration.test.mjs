@@ -970,11 +970,10 @@ test(
       });
       assert.ok(requestRow, "不論成功或失敗都要留下請求紀錄（規格 9）");
       if (asked.status === 201) {
-        assert.ok(
-          suggested.suggestions.length >= 1 &&
-            suggested.suggestions.length <= 5,
-          "一次最多 5 則",
-        );
+        assert.ok(suggested.suggestions.length <= 5, "一次最多 5 則");
+        // 沒有依據時不硬湊：可以是 0 則，這時要附上固定提示（規格 4.1）。
+        if (suggested.suggestions.length === 0)
+          assert.equal(suggested.notice, "沒有可推薦的句子");
         assert.equal(requestRow.status, suggested.status);
         assert.ok(requestRow.modelName, "要記下實際回應的模型");
         assert.equal(

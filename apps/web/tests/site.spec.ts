@@ -202,8 +202,10 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
     release();
     const chip = b.locator(".ai-chips button").first();
     const failed = b.locator(".chat-panel .error");
+    // AI 找不到依據時不硬湊，只顯示這句提示（規格 4.1）。
+    const none = b.locator(".ai-note", { hasText: "沒有可推薦的句子" });
     // CI 的 compose 沒有 ai 服務，這時要如實顯示錯誤而不是卡住或假裝成功。
-    await expect(chip.or(failed)).toBeVisible({ timeout: 45000 });
+    await expect(chip.or(failed).or(none)).toBeVisible({ timeout: 45000 });
     await b.unroute("**/reply-suggestions");
     await expect(
       b.locator(".bubble", { hasText: "等待中按 Enter 不能送出" }),

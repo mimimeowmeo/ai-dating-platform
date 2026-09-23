@@ -2,15 +2,18 @@
 
 流程：
 1. 判斷模式（開場／回覆／追問／重啟）。
-2. 準備 A、B 的風格卡（沒有就用 bio 冷啟動），算出第 1 則與其餘的風格目標。
-3. 計算 B 在這個聊天室的反應熱度。
-4. 組 prompt，請模型產生 5 則候選（結構化輸出，格式不合會自動重試）。
-5. 後處理：單行化、簡轉繁、長度與安全規則、去重。
-6. 排序：第 1 則挑最接近「第 1 則目標」的 B 風格候選；其餘依內容優先度與風格距離。
+2. 準備 A、B 的風格卡（沒有就用 bio 冷啟動），算出這一批 5 則共用的風格目標：
+   整個聊天室還沒有任何訊息時 B 100%，只要有人傳過訊息就 A 80%／B 20%。
+3. 完全沒有資料根據時（見 has_topic_basis）不呼叫模型，直接回「沒有可推薦的句子」。
+4. 計算 B 在這個聊天室的反應熱度。
+5. 組 prompt，請模型產生最多 5 則候選（結構化輸出；沒有依據時可以少給甚至不給，不硬湊）。
+6. 後處理：單行化、簡轉繁、長度與安全規則、去重。
+7. 排序：B 剛問了問題時回答類優先，再依模型給的優先度，最後依離風格目標多近。
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
@@ -24,14 +27,16 @@ from .schemas import (
     DraftBatch,
     DraftSuggestion,
     Mode,
+    ProfileSnapshot,
     RejectedSuggestion,
     ReplySuggestionRequest,
     ReplySuggestionResponse,
-    StyleStats,
-    StyleTargets,
+    StyleCard,
+    StyleTarget,
     Suggestion,
+    UsageInfo,
 )
-from .style import SITE_DEFAULT_STATS, partner_reactions, resolve_targets, style_distance, usable_card
+from .style import SITE_DEFAULT_STATS, partner_reactions, resolve_target, style_distance, usable_card
 from .textutil import as_utc, has_question, single_line, text_similarity, to_taiwan_traditional, visible_chars
 
 MIN_RETURN = 3
@@ -39,6 +44,10 @@ MAX_RETURN = 5
 MAX_SUGGESTION_CHARS = 80
 DUPLICATE_SIMILARITY = 0.8
 REVIVE_AFTER = timedelta(days=7)
+# 一則推薦都給不出來時的提示（2026-09-23 使用者指定的文字）；前端只顯示這句話，不會填任何字進輸入框。
+NO_SUGGESTION_NOTICE = "沒有可推薦的句子"
+# 檔案裡「可以拿來聊」的標籤類欄位；暱稱、年齡、性別、城市、身高不算（見 profile_has_topics）。
+PROFILE_TOPIC_LISTS = ("interests", "hobbies", "foods", "traits", "datingGoals")
 
 
 def sort_chat(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -72,14 +81,47 @@ def partner_asked_question(messages: list[ChatMessage]) -> bool:
     return False
 
 
+def profile_has_topics(profile: ProfileSnapshot) -> bool:
+    """這份檔案有沒有「可以拿來聊」的內容：自我介紹、職業、學歷，或任何一類興趣標籤。
+
+    暱稱、年齡、性別、城市、身高不算：這些是註冊時人人都有（或只是數字）的基本資料，
+    只靠它們寫出來的只會是「嗨～你好」這類空泛的招呼，也就是使用者說的「硬推薦」。
+    """
+    if profile.bio.strip() or (profile.occupation or "").strip() or (profile.education or "").strip():
+        return True
+    return any(getattr(profile, field) for field in PROFILE_TOPIC_LISTS)
+
+
+def has_topic_basis(request: ReplySuggestionRequest, recent: list[ChatMessage], partner_card: StyleCard) -> bool:
+    """這次有沒有任何「資料根據」可以寫推薦（2026-09-23 使用者決定：沒有根據就不要硬推薦）。
+
+    任何一項有內容就算有根據：
+    - 對話：最近的訊息、聊天室摘要、檢索到的舊對話片段（有訊息的聊天室一定算有根據）；
+    - 共同標籤；
+    - A 或 B 的檔案內容（見 profile_has_topics）；
+    - B 的喜好特徵句（這次檢索到的，或 B 風格卡上的）。
+    全部都沒有時，模型能寫的只剩空泛的招呼，所以呼叫端不呼叫模型，直接回「沒有可推薦的句子」。
+    partner_card 要傳 usable_card 處理過的 B 風格卡。
+    """
+    return bool(
+        recent
+        or (request.conversationSummary or "").strip()
+        or request.retrievedChunks
+        or request.sharedTags
+        or request.partnerFacets
+        or partner_card.facets
+        or profile_has_topics(request.partner)
+        or profile_has_topics(request.requester)
+    )
+
+
 @dataclass
 class Candidate:
-    """通過後處理的一則候選，加上它與兩個風格目標的距離。"""
+    """通過後處理的一則候選，加上它離這一批風格目標的距離（0 最像）。"""
 
     text: str
     draft: DraftSuggestion
-    distance_first: float
-    distance_others: float
+    distance: float
 
 
 def clean_drafts(
@@ -114,63 +156,58 @@ def clean_drafts(
 
 
 def rank_candidates(
-    drafts: list[DraftSuggestion],
-    first_target: StyleStats,
-    others_target: StyleStats,
-    first_is_partner: bool,
-    answer_first: bool,
+    drafts: list[DraftSuggestion], target: StyleTarget, answer_first: bool
 ) -> tuple[list[Suggestion], list[RejectedSuggestion]]:
     """排序並編號（規格 4.1），回傳最多 5 則推薦，以及因為超過 5 則而被捨棄的候選。
 
-    - 第 1 則：優先從 styleTarget=partner 的候選裡挑「最接近第 1 則目標」的；
-      模型沒有給 partner 候選時，從全部候選裡挑最接近的。
-    - 其餘：B 剛問了問題時「回答」類優先；再依模型給的 priority；最後依與「其餘目標」的距離。
-    第 1 則的 styleTarget 會依實際來源標示：B 有資料時是 partner，退回 A 的寫法時是 blend。
+    一批 5 則共用同一個風格目標（見 style.resolve_target），所以每一名的排序規則都一樣：
+    1. B 剛問了問題時，「回答」類排前面；
+    2. 模型給的 priority（1 最推薦）；
+    3. 離風格目標越近越前面。
+    第 1 名會被前端用打字動畫填進輸入框。
+    styleTarget 依這一批的規則標示：目標完全照 B（聊天室的第一則訊息、B 有資料）時是 partner，
+    其餘都是 blend。
     """
     if not drafts:
         return [], []
+    label: Literal["partner", "blend"] = "partner" if target.source == "partner" else "blend"
     candidates = [
-        Candidate(
-            text=draft.text,
-            draft=draft,
-            distance_first=style_distance(draft.text, first_target),
-            distance_others=style_distance(draft.text, others_target),
-        )
-        for draft in drafts
+        Candidate(text=draft.text, draft=draft, distance=style_distance(draft.text, target.stats)) for draft in drafts
     ]
-    partner_pool = [item for item in candidates if item.draft.styleTarget == "partner"] or candidates
-    first = min(partner_pool, key=lambda item: (item.distance_first, item.draft.priority))
-    rest = [item for item in candidates if item is not first]
-    rest.sort(
+    candidates.sort(
         key=lambda item: (
             0 if answer_first and item.draft.intent == "answer" else 1,
             item.draft.priority,
-            item.distance_others,
+            item.distance,
         )
     )
-    ordered = [first, *rest]
     suggestions = [
         Suggestion(
             rank=index + 1,
             text=item.text,
             intent=item.draft.intent,
-            styleTarget=("partner" if first_is_partner else "blend") if index == 0 else "blend",
-            styleDistance=item.distance_first if index == 0 else item.distance_others,
+            styleTarget=label,
+            styleDistance=item.distance,
             reason=single_line(item.draft.reason)[:120],
         )
-        for index, item in enumerate(ordered[:MAX_RETURN])
+        for index, item in enumerate(candidates[:MAX_RETURN])
     ]
-    overflow = [RejectedSuggestion(text=item.text, reasonCode="OVER_LIMIT") for item in ordered[MAX_RETURN:]]
+    overflow = [RejectedSuggestion(text=item.text, reasonCode="OVER_LIMIT") for item in candidates[MAX_RETURN:]]
     return suggestions, overflow
 
 
-def notice_for(count: int) -> tuple[str, str | None]:
-    """依最後保留的則數決定狀態與提示文字（規格 4.1：不足 3 則顯示剩下的並提示，不硬湊）。"""
+def notice_for(count: int) -> tuple[Literal["ok", "partial", "empty"], str | None]:
+    """依最後保留的則數決定狀態與提示文字（規格 4.1：不硬湊）。
+
+    - 3～5 則：ok，沒有提示。
+    - 1～2 則：partial，提示「只找到 N 則合適的建議」，顯示剩下的就好。
+    - 0 則：empty，提示「沒有可推薦的句子」；前端只顯示這句話，不會填任何字進輸入框。
+    """
     if count >= MIN_RETURN:
         return "ok", None
     if count > 0:
         return "partial", f"只找到 {count} 則合適的建議"
-    return "empty", "這次沒有產生合適的建議，請再試一次"
+    return "empty", NO_SUGGESTION_NOTICE
 
 
 class ReplySuggester:
@@ -208,25 +245,40 @@ class ReplySuggester:
         return self.model is not None
 
     async def generate(self, request: ReplySuggestionRequest) -> ReplySuggestionResponse:
-        """執行完整的推薦流程並回傳結果；模型不可用時丟出 AIServiceError（LLM_*）。"""
+        """執行完整的推薦流程並回傳結果；模型不可用時丟出 AIServiceError（LLM_*）。
+
+        完全沒有資料根據時（見 has_topic_basis）不呼叫模型，直接回 status=empty 與
+        「沒有可推薦的句子」；這時 modelName 是 None、usage 全是 0。
+        """
         now = as_utc(request.now) if request.now else datetime.now(timezone.utc)
         recent = sort_chat(list(request.recentMessages))
         mode = request.mode or detect_mode(recent, now)
         site = request.siteStats or SITE_DEFAULT_STATS
         requester_card = usable_card(request.requesterStyle, request.requester, site)
         partner_card = usable_card(request.partnerStyle, request.partner, site)
-        first_target, others_target, first_source = resolve_targets(requester_card, partner_card, request.blend)
+        # 「第一則訊息」指的是整個聊天室的第一則：後端送來的是這個聊天室最新的 60 則，
+        # 只要有人（A 或 B）傳過任何一則，recent 就不會是空的，B 100% 的規則也就不再適用。
+        target = resolve_target(requester_card, partner_card, request.blend, first_message=not recent)
+        if not has_topic_basis(request, recent, partner_card):
+            return ReplySuggestionResponse(
+                requestId=request.requestId,
+                status="empty",
+                mode=mode,
+                suggestions=[],
+                rejected=[],
+                notice=NO_SUGGESTION_NOTICE,
+                modelName=None,
+                promptVersion=REPLY_PROMPT_VERSION,
+                usage=UsageInfo(),
+                target=target,
+            )
         reactions = partner_reactions(recent)
-        prompt = build_reply_prompt(
-            request, mode, requester_card, partner_card, first_target, others_target, first_source, reactions, recent
-        )
+        prompt = build_reply_prompt(request, mode, requester_card, partner_card, target, reactions, recent)
         result = await run_agent(
             self.agent, prompt, self.model, self.settings.llm_timeout_seconds, "LLM_NOT_CONFIGURED", "LLM_UNAVAILABLE"
         )
         kept, rejected = clean_drafts(list(result.output.suggestions), list(request.excludeTexts))
-        suggestions, overflow = rank_candidates(
-            kept, first_target, others_target, first_source == "partner", partner_asked_question(recent)
-        )
+        suggestions, overflow = rank_candidates(kept, target, partner_asked_question(recent))
         status, notice = notice_for(len(suggestions))
         return ReplySuggestionResponse(
             requestId=request.requestId,
@@ -238,5 +290,5 @@ class ReplySuggester:
             modelName=model_name_of(result),
             promptVersion=REPLY_PROMPT_VERSION,
             usage=usage_info(result),
-            targets=StyleTargets(first=first_target, others=others_target, firstSource=first_source),
+            target=target,
         )

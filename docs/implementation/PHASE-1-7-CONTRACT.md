@@ -72,9 +72,11 @@
 完整規則見 [AI 推薦回覆規格](../ai/REPLY-SUGGESTIONS-SPEC.md)。
 
 - `POST /conversations/:id/reply-suggestions` → `{requestId,status,mode,notice,suggestions[]}`。
-  - `status`：`ok`（3～5 則）／`partial`（1～2 則，`notice` 說明原因）／`empty`（0 則）。
+  - `status`：`ok`（3～5 則）／`partial`（1～2 則，`notice` 說明原因）／`empty`（0 則，`notice` 是「沒有可推薦的句子」；
+    完全沒有資料根據時 AI 服務不呼叫模型，直接回這個結果）。
   - `mode`：`opener`／`reply`／`follow_up`／`revive`，由 AI 服務依聊天室狀態判斷。
-  - `suggestions[]`：`{id,rank,text,intent}`；`rank 1` 用 B 的寫法，其餘為 A 80%／B 20%。
+  - `suggestions[]`：`{id,rank,text,intent}`；聊天室還沒有任何訊息時 5 則都照 B 的寫法（B 100%），
+    有人傳過訊息之後 5 則都是 A 80%／B 20%。
     `id` 就是送訊息時要帶的 `suggestionId`。
   - 必須是聊天室成員，否則 404；每人每分鐘上限 30 次（防連打，不是產品配額）。
   - AI 服務不可用時回 503 `AI_UNAVAILABLE`（未設定模型時 `AI_NOT_CONFIGURED`），

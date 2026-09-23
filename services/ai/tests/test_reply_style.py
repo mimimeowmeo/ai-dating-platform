@@ -8,7 +8,7 @@ from app.reply.style import (
     cold_start_card,
     compute_style_stats,
     partner_reactions,
-    resolve_targets,
+    resolve_target,
     style_distance,
     usable_card,
 )
@@ -72,15 +72,29 @@ class StyleStatsTests(unittest.TestCase):
         empty = cold_start_card(profile("小美", bio="嗨"), SITE_DEFAULT_STATS)
         self.assertEqual((empty.confidence, empty.sampleSource), ("none", "none"))
 
-    def test_resolve_targets_first_is_partner_and_falls_back_to_requester(self):
+    def test_resolve_target_uses_partner_only_for_the_chat_first_message(self):
         requester = cold_start_card(profile("阿明", bio="平常喜歡打羽球跟煮飯，也愛看電影"), SITE_DEFAULT_STATS)
         requester = requester.model_copy(update={"stats": stats(medianChars=8)})
         partner = requester.model_copy(update={"stats": stats(medianChars=15)})
-        first, others, source = resolve_targets(requester, partner, BlendConfig())
-        self.assertEqual((first.medianChars, others.medianChars, source), (15, 9.4, "partner"))
+        # 聊天室還沒有任何訊息：整批照 B（B 100%）。
+        first = resolve_target(requester, partner, BlendConfig(), first_message=True)
+        self.assertEqual((first.rule, first.source, first.stats.medianChars), ("first_message", "partner", 15))
+        # 有人傳過訊息之後：A 80%／B 20%（0.8 × 8 + 0.2 × 15）。
+        later = resolve_target(requester, partner, BlendConfig(), first_message=False)
+        self.assertEqual((later.rule, later.source, later.stats.medianChars), ("later", "blend", 9.4))
+        # B 沒有足夠資料：不論哪一種都只用 A 的寫法。
         unknown = usable_card(None, profile("小美", bio="嗨"), SITE_DEFAULT_STATS)
-        first, others, source = resolve_targets(requester, unknown, BlendConfig())
-        self.assertEqual((first.medianChars, others.medianChars, source), (8, 8, "requester"))
+        for first_message in (True, False):
+            fallback = resolve_target(requester, unknown, BlendConfig(), first_message=first_message)
+            self.assertEqual((fallback.source, fallback.stats.medianChars), ("requester", 8))
+
+    def test_resolve_target_labels_source_by_weight(self):
+        requester = cold_start_card(profile("阿明", bio="平常喜歡打羽球跟煮飯，也愛看電影"), SITE_DEFAULT_STATS)
+        requester = requester.model_copy(update={"stats": stats(medianChars=8)})
+        partner = requester.model_copy(update={"stats": stats(medianChars=15)})
+        blend = BlendConfig(firstMessagePartnerWeight=0.5, laterPartnerWeight=0.0)
+        self.assertEqual(resolve_target(requester, partner, blend, first_message=True).source, "blend")
+        self.assertEqual(resolve_target(requester, partner, blend, first_message=False).source, "requester")
 
 
 class ReactionTests(unittest.TestCase):
