@@ -39,7 +39,11 @@ jobs:
       # （apps/api/src/auth.ts 的 limit(`auth:${ip}`, 20, 300)），
       # 撞到之後的測試會以「註冊後停在 /register」的形式假性失敗。
       - run: docker compose -f docker-compose.ci.yml exec -T redis sh -c "redis-cli --scan --pattern 'rate:*' | xargs -r redis-cli DEL"
-      - run: pnpm test:e2e
+      # desktop 與 mobile 分兩次跑、中間再清一次計數：整套 e2e 合計的註冊／登入
+      # 已經超過 20 次，一次跑完，排在後面的 mobile 測試會撞到限流（429）。
+      - run: pnpm test:e2e --project desktop
+      - run: docker compose -f docker-compose.ci.yml exec -T redis sh -c "redis-cli --scan --pattern 'rate:*' | xargs -r redis-cli DEL"
+      - run: pnpm test:e2e --project mobile
       - run: pnpm audit --prod --audit-level high
       - uses: actions/upload-artifact@v4
         if: failure()
