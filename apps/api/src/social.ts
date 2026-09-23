@@ -90,7 +90,69 @@ export class Social {
       .slice(0, 30)
       .map((u) => card(u, id));
   }
-  async interact(id: string, body: unknown) {
+  /**
+   * 測試用：用顯示名稱或 email 搜尋除了自己以外的全部使用者（不分大小寫、部分符合），
+   * 已經按過喜歡／略過的人也列出，可以重新按來改變狀態。沒有個人檔案的人畫不出卡片，不列出。
+   * 每筆附上 searchState：我按過什麼、配對狀態、雙方偏好是否相符、是否封鎖中。
+   * 從搜尋列按喜歡／略過走 POST /discovery/search/interactions（interact 的測試模式）。
+   */
+  async search(id: string, q: unknown) {
+    const text = parse(z.string().trim().min(1).max(100), q);
+    const me = await this.db.user.findUniqueOrThrow({
+      where: { id },
+      include: userInclude,
+    });
+    const users = await this.db.user.findMany({
+      where: {
+        id: { not: id },
+        profile: { isNot: null },
+        OR: [
+          { email: { contains: text, mode: "insensitive" } },
+          { profile: { displayName: { contains: text, mode: "insensitive" } } },
+        ],
+      },
+      include: {
+        ...userInclude,
+        receivedInteractions: {
+          where: { fromUserId: id },
+          select: { action: true },
+        },
+        blocks: { where: { blockedUserId: id }, select: { id: true } },
+        blockedBy: { where: { userId: id }, select: { id: true } },
+        matchesA: { where: { userBId: id }, select: { status: true } },
+        matchesB: { where: { userAId: id }, select: { status: true } },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+      take: 20,
+    });
+    return users.map((u) => {
+      const match = [...u.matchesA, ...u.matchesB][0];
+      const blocked = u.blocks.length > 0 || u.blockedBy.length > 0;
+      const view = card(u, id)!;
+      return {
+        ...view,
+        // 封鎖後照片連結會回 404，乾脆不給。
+        photos: blocked ? [] : view.photos,
+        searchState: {
+          action: u.receivedInteractions[0]?.action ?? null,
+          match: match
+            ? match.status === "active"
+              ? "active"
+              : "ended"
+            : null,
+          eligible: this.eligible(me, u) && this.eligible(u, me),
+          blocked,
+        },
+      };
+    });
+  }
+  /**
+   * 按喜歡／略過。test 為 true 時是搜尋列（測試用）送來的，規則放寬：
+   * ・封鎖中會先解除雙方的封鎖（兩個方向都解除），再照常處理。
+   * ・不檢查雙方偏好。
+   * ・已配對時按略過會解除配對（同 unmatch）；配對已結束時互相喜歡，恢復原本的配對。
+   */
+  async interact(id: string, body: unknown, test = false) {
     const dto = parse(
       z
         .object({
@@ -102,18 +164,18 @@ export class Social {
     );
     if (id === dto.targetUserId)
       return fail(400, "SELF_INTERACTION", "無法對自己操作。");
+    // 測試模式解除配對時，交易完成後要斷開這個聊天室的即時連線。
+    let revoked: string | undefined;
     const result = await this.db.$transaction(async (tx) => {
       await pairLock(tx, id, dto.targetUserId);
-      if (
-        await tx.block.findFirst({
-          where: {
-            OR: [
-              { userId: id, blockedUserId: dto.targetUserId },
-              { userId: dto.targetUserId, blockedUserId: id },
-            ],
-          },
-        })
-      )
+      const pairBlocks = {
+        OR: [
+          { userId: id, blockedUserId: dto.targetUserId },
+          { userId: dto.targetUserId, blockedUserId: id },
+        ],
+      };
+      if (test) await tx.block.deleteMany({ where: pairBlocks });
+      else if (await tx.block.findFirst({ where: pairBlocks }))
         return fail(403, "BLOCKED", "目前無法互動。");
       const users = await tx.user.findMany({
         where: { id: { in: [id, dto.targetUserId] } },
@@ -122,13 +184,17 @@ export class Social {
       const me = users.find((u) => u.id === id),
         other = users.find((u) => u.id === dto.targetUserId);
       if (!other) return fail(404, "NOT_FOUND", "找不到使用者。");
-      if (!me || !this.eligible(me, other) || !this.eligible(other, me))
+      if (
+        !test &&
+        (!me || !this.eligible(me, other) || !this.eligible(other, me))
+      )
         return fail(409, "NOT_ELIGIBLE", "對方目前不符合雙方偏好。");
       const [userAId, userBId] = [id, dto.targetUserId].sort();
       const existing = await tx.match.findUnique({
         where: { userAId_userBId: { userAId, userBId } },
+        include: { conversation: true },
       });
-      if (existing)
+      if (existing && !test)
         return {
           matched: existing.status === "active",
           matchId: existing.status === "active" ? existing.id : undefined,
@@ -145,6 +211,17 @@ export class Social {
         },
         update: { action: dto.action },
       });
+      // 以下只有測試模式會遇到：既有配對。
+      if (existing?.status === "active") {
+        if (dto.action === "like")
+          return { matched: true, matchId: existing.id, created: false };
+        await tx.match.update({
+          where: { id: existing.id },
+          data: { status: "unmatched", unmatchedAt: new Date() },
+        });
+        revoked = existing.conversation?.id;
+        return { matched: false, created: false };
+      }
       const reciprocal = await tx.interaction.findUnique({
         where: {
           fromUserId_toUserId: { fromUserId: dto.targetUserId, toUserId: id },
@@ -152,20 +229,27 @@ export class Social {
       });
       if (dto.action !== "like" || reciprocal?.action !== "like")
         return { matched: false, created: false };
-      const match = await tx.match.create({
-        data: {
-          userAId,
-          userBId,
-          conversation: {
-            create: {
-              members: {
-                create: [{ userId: id }, { userId: dto.targetUserId }],
+      // 配對已結束（只有測試模式會走到這裡）：恢復原本的配對，聊天紀錄一併回來。
+      const match = existing
+        ? await tx.match.update({
+            where: { id: existing.id },
+            data: { status: "active", unmatchedAt: null },
+            include: { conversation: true },
+          })
+        : await tx.match.create({
+            data: {
+              userAId,
+              userBId,
+              conversation: {
+                create: {
+                  members: {
+                    create: [{ userId: id }, { userId: dto.targetUserId }],
+                  },
+                },
               },
             },
-          },
-        },
-        include: { conversation: true },
-      });
+            include: { conversation: true },
+          });
       for (const userId of [id, dto.targetUserId])
         await tx.notification.create({
           data: {
@@ -179,6 +263,7 @@ export class Social {
         });
       return { matched: true, matchId: match.id, created: true };
     });
+    if (revoked) this.revoke(revoked);
     if (result.created)
       for (const userId of [id, dto.targetUserId])
         this.publish(userId, "notification:new", {

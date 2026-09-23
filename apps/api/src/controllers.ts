@@ -180,6 +180,20 @@ export class ProductController {
   @Get("discovery") discovery(@Req() r: AuthRequest) {
     return this.social.discovery(r.userId);
   }
+  // 測試用搜尋：GET /discovery/search?q=名稱或 email。
+  @Get("discovery/search") search(
+    @Req() r: AuthRequest,
+    @Query("q") q: unknown,
+  ) {
+    return this.social.search(r.userId, q);
+  }
+  // 測試用：從搜尋列按喜歡／略過，規則見 Social.interact 的 test 模式。
+  @Post("discovery/search/interactions") searchInteraction(
+    @Req() r: AuthRequest,
+    @Body() b: unknown,
+  ) {
+    return this.social.interact(r.userId, b, true);
+  }
   @Post("interactions") interaction(@Req() r: AuthRequest, @Body() b: unknown) {
     return this.social.interact(r.userId, b);
   }
