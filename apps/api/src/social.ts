@@ -180,6 +180,52 @@ export class Social {
       ...(result.matchId ? { matchId: result.matchId } : {}),
     };
   }
+  /**
+   * 我按過「喜歡」的人（送出的喜歡）。
+   * status：waiting＝還在等對方回應；matched＝對方也喜歡你，conversationId 就是聊天室。
+   *
+   * 可見性條件直接寫在查詢裡（同 discovery 的做法），take 才會是「可見的前 200 筆」，
+   * 而不是先抓 200 筆再濾掉一堆、讓實際筆數因人而異：
+   * ・任一方封鎖、或對方還沒填個人檔案 → 不列出（與配對清單同一套規則）。
+   * ・配對已結束（unmatched／blocked）→ 不列出：interact() 遇到既有配對就不會再寫 like，
+   *   這種人留著只會永遠顯示「等待回應」。
+   */
+  async likesSent(id: string) {
+    const rows = await this.db.interaction.findMany({
+      where: {
+        fromUserId: id,
+        action: "like",
+        toUser: {
+          profile: { isNot: null },
+          blocks: { none: { blockedUserId: id } },
+          blockedBy: { none: { userId: id } },
+          matchesA: { none: { userBId: id, status: { not: "active" } } },
+          matchesB: { none: { userAId: id, status: { not: "active" } } },
+        },
+      },
+      include: { toUser: { include: userInclude } },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+    });
+    const matches = await this.db.match.findMany({
+      where: { status: "active", OR: [{ userAId: id }, { userBId: id }] },
+      include: { conversation: { select: { id: true } } },
+    });
+    const matched = new Map(
+      matches.map((m) => [m.userAId === id ? m.userBId : m.userAId, m]),
+    );
+    return rows.map((row) => {
+      const m = matched.get(row.toUserId);
+      return {
+        targetUserId: row.toUserId,
+        createdAt: row.createdAt,
+        status: m ? "matched" : "waiting",
+        ...(m ? { matchId: m.id } : {}),
+        ...(m?.conversation ? { conversationId: m.conversation.id } : {}),
+        user: card(row.toUser, id),
+      };
+    });
+  }
   async matches(id: string, matchId?: string) {
     if (matchId) uuid(matchId);
     const matches = await this.db.match.findMany({

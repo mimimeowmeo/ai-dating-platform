@@ -48,6 +48,7 @@ import {
   type Profile,
   type Preferences,
   type Match,
+  type SentLike,
   type Conversation,
   type Message,
   type ReplySuggestion,
@@ -222,6 +223,17 @@ function dayLabel(iso: string) {
             day: "numeric",
           });
   return `${day} ${clock(iso)}`;
+}
+// 按下喜歡的時間：一週內講幾天前，再久就寫日期。
+function likedLabel(iso: string) {
+  const days = daysAgo(iso);
+  if (days <= 0) return "今天按下喜歡";
+  if (days === 1) return "昨天按下喜歡";
+  if (days < 7) return `${days} 天前按下喜歡`;
+  return `${new Date(iso).toLocaleDateString("zh-TW", {
+    month: "numeric",
+    day: "numeric",
+  })} 按下喜歡`;
 }
 function matchedLabel(iso: string) {
   const hours = (Date.now() - new Date(iso).getTime()) / 3_600_000;
@@ -445,7 +457,7 @@ export function DatingApp() {
     const invalidate = () => {
       void client.invalidateQueries({
         predicate: (q) =>
-          ["/conversations", "/matches", "/notifications"].includes(
+          ["/conversations", "/matches", "/likes", "/notifications"].includes(
             q.queryKey[0] as string,
           ),
       });
@@ -1001,6 +1013,7 @@ function Discover() {
       setMatch(result.matched);
       await client.invalidateQueries({ queryKey: ["/discovery"] });
       await client.invalidateQueries({ queryKey: ["/matches"] });
+      await client.invalidateQueries({ queryKey: ["/likes"] });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1979,10 +1992,30 @@ function VerificationPage() {
     </>
   );
 }
+const matchTags = [
+  { key: "all", label: "全部" },
+  { key: "matched", label: "已配對" },
+  { key: "liked", label: "我喜歡的" },
+] as const;
+type MatchTag = (typeof matchTags)[number]["key"];
 function MatchesPage() {
   const q = useData<Match[]>("/matches");
+  const likes = useData<SentLike[]>("/likes");
   const client = useQueryClient();
   const [error, setError] = useState("");
+  const [tag, setTag] = useState<MatchTag>("all");
+  const [person, setPerson] = useState<Card | null>(null);
+  const matches = q.data ?? [];
+  // 已配對以 /matches 為準；兩個查詢刷新有先後，這裡再排除一次，同一個人才不會出現兩張卡。
+  const matchedIds = new Set(matches.map((m) => m.otherUser.userId));
+  const liked = (likes.data ?? []).filter(
+    (l) => l.status === "waiting" && !matchedIds.has(l.targetUserId),
+  );
+  const counts: Record<MatchTag, number> = {
+    all: matches.length + liked.length,
+    matched: matches.length,
+    liked: liked.length,
+  };
   return (
     <>
       <Heading
@@ -1990,102 +2023,159 @@ function MatchesPage() {
         title="我的配對"
         text="相互喜歡，是故事的第一頁。"
       >
-        {!!q.data?.length && (
+        {!!counts.all && (
           <div className="section-bar">
-            <h2>{q.data.length} 位共同喜歡的你</h2>
+            <div className="tags selectable" role="group" aria-label="篩選">
+              {matchTags.map((t) => (
+                <button
+                  type="button"
+                  key={t.key}
+                  aria-pressed={tag === t.key}
+                  onClick={() => setTag(t.key)}
+                >
+                  {t.label} {counts[t.key]}
+                </button>
+              ))}
+            </div>
             <Link className="button secondary" href="/preferences">
               探索偏好
             </Link>
           </div>
         )}
       </Heading>
-      <ErrorText message={error || q.error?.message} />
-      {q.isLoading ? (
+      <ErrorText message={error || q.error?.message || likes.error?.message} />
+      {q.isLoading || likes.isLoading ? (
         <Loading />
-      ) : !q.data?.length ? (
+      ) : !counts.all ? (
         <Empty
           title="你的下一個火花，還在路上"
           text="到探索看看，彼此喜歡後會在這裡相遇。"
           link="/discover"
           label="開始探索"
         />
+      ) : !counts[tag] ? (
+        tag === "matched" ? (
+          <Empty
+            title="還沒有互相喜歡的人"
+            text="對方也按下喜歡後，就會出現在這裡。"
+          />
+        ) : (
+          <Empty
+            title="目前沒有等待回應的喜歡"
+            text="在探索按下喜歡的人，會先出現在這裡。"
+            link="/discover"
+            label="開始探索"
+          />
+        )
       ) : (
         <div className="match-grid">
-          {q.data.map((m) => {
-            const fresh = matchedLabel(m.createdAt);
-            return (
-              <article
-                className={fresh ? "match-card fresh" : "match-card"}
-                key={m.id}
-              >
-                <Portrait person={m.otherUser} large />
-                <div className="match-copy">
-                  {fresh && (
+          {tag !== "liked" &&
+            matches.map((m) => {
+              const fresh = matchedLabel(m.createdAt);
+              return (
+                <article
+                  className={fresh ? "match-card fresh" : "match-card"}
+                  key={m.id}
+                >
+                  <Portrait person={m.otherUser} large />
+                  <div className="match-copy">
                     <p className="match-flag">
-                      <span className="badge">新配對</span>
+                      <span className="badge">已配對</span>
                       {fresh}
                     </p>
-                  )}
+                    <h2>
+                      {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                    </h2>
+                    <p>
+                      {m.otherUser.bio ||
+                        [m.otherUser.city, goalText(m.otherUser.datingGoals)]
+                          .filter(Boolean)
+                          .join(" · ")}
+                    </p>
+                    <div className="match-actions">
+                      <Link
+                        className="button"
+                        href={`/messages/${m.conversationId}`}
+                      >
+                        開始聊天
+                      </Link>
+                      <div className="sub-actions">
+                        <button
+                          onClick={async () => {
+                            if (
+                              !window.confirm(
+                                "確定結束配對？這段對話將無法繼續。",
+                              )
+                            )
+                              return;
+                            try {
+                              await api(`/matches/${m.id}`, {
+                                method: "DELETE",
+                              });
+                              await client.invalidateQueries();
+                            } catch (e) {
+                              setError((e as Error).message);
+                            }
+                          }}
+                        >
+                          結束配對
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm("確定封鎖對方並結束配對？"))
+                              return;
+                            try {
+                              await send("/blocks", {
+                                blockedUserId: m.otherUser.userId,
+                              });
+                              await client.invalidateQueries();
+                            } catch (e) {
+                              setError((e as Error).message);
+                            }
+                          }}
+                        >
+                          封鎖
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          {tag !== "matched" &&
+            liked.map((l) => (
+              <article className="match-card" key={l.targetUserId}>
+                <Portrait person={l.user} large />
+                <div className="match-copy">
+                  <p className="match-flag">
+                    <span className="badge soft">我喜歡的</span>
+                    {likedLabel(l.createdAt)}
+                  </p>
                   <h2>
-                    {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                    {l.user.displayName} <span>{l.user.age}</span>
                   </h2>
                   <p>
-                    {m.otherUser.bio ||
-                      [m.otherUser.city, goalText(m.otherUser.datingGoals)]
+                    {l.user.bio ||
+                      [l.user.city, goalText(l.user.datingGoals)]
                         .filter(Boolean)
                         .join(" · ")}
                   </p>
                   <div className="match-actions">
-                    <Link
-                      className="button"
-                      href={`/messages/${m.conversationId}`}
+                    <button
+                      type="button"
+                      className="button secondary"
+                      onClick={() => setPerson(l.user)}
                     >
-                      開始聊天
-                    </Link>
-                    <div className="sub-actions">
-                      <button
-                        onClick={async () => {
-                          if (
-                            !window.confirm(
-                              "確定結束配對？這段對話將無法繼續。",
-                            )
-                          )
-                            return;
-                          try {
-                            await api(`/matches/${m.id}`, {
-                              method: "DELETE",
-                            });
-                            await client.invalidateQueries();
-                          } catch (e) {
-                            setError((e as Error).message);
-                          }
-                        }}
-                      >
-                        結束配對
-                      </button>
-                      <button
-                        onClick={async () => {
-                          if (!window.confirm("確定封鎖對方並結束配對？"))
-                            return;
-                          try {
-                            await send("/blocks", {
-                              blockedUserId: m.otherUser.userId,
-                            });
-                            await client.invalidateQueries();
-                          } catch (e) {
-                            setError((e as Error).message);
-                          }
-                        }}
-                      >
-                        封鎖
-                      </button>
-                    </div>
+                      看看檔案
+                    </button>
                   </div>
                 </div>
               </article>
-            );
-          })}
+            ))}
         </div>
+      )}
+      {person && (
+        <PersonDialog person={person} onClose={() => setPerson(null)} />
       )}
     </>
   );

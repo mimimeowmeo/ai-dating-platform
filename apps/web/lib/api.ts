@@ -68,6 +68,18 @@ export type Conversation = {
   unreadCount: number;
   otherLastReadAt: string | null;
 };
+/**
+ * 我按過「喜歡」的一筆紀錄（GET /likes）。
+ * status：waiting＝還在等對方回應；matched＝對方也喜歡你，conversationId 就是聊天室。
+ */
+export type SentLike = {
+  targetUserId: string;
+  createdAt: string;
+  status: "waiting" | "matched";
+  matchId?: string;
+  conversationId?: string;
+  user: Card;
+};
 export type Match = {
   id: string;
   createdAt: string;

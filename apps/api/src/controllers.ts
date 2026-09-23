@@ -136,6 +136,10 @@ export class ProductController {
   @Post("interactions") interaction(@Req() r: AuthRequest, @Body() b: unknown) {
     return this.social.interact(r.userId, b);
   }
+  // 我按過「喜歡」的人，含「還在等對方回應」與「已配對」兩種狀態。
+  @Get("likes") likes(@Req() r: AuthRequest) {
+    return this.social.likesSent(r.userId);
+  }
   @Get("matches") matches(@Req() r: AuthRequest) {
     return this.social.matches(r.userId);
   }

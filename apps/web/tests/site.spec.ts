@@ -383,6 +383,92 @@ test("多分頁同時開啟不會登出、仍即時收訊；手機開啟不存�
     await Promise.all(contexts.map((c) => c.close()));
   }
 });
+test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩選", async ({
+  browser,
+}, info) => {
+  test.skip(
+    info.project.name === "mobile",
+    "雙人流程在桌面執行，手機版面由拉桿與 RWD 測試涵蓋。",
+  );
+  const base = process.env.E2E_BASE_URL || "http://localhost:8080";
+  const contexts = [
+    await browser.newContext({ baseURL: base }),
+    await browser.newContext({ baseURL: base }),
+  ];
+  try {
+    const people = [];
+    for (let i = 0; i < 2; i++) {
+      const auth = await contexts[i].request.post("/api/v1/auth/register", {
+        data: { email: newEmail(), password: `Safe-${randomUUID()}` },
+      });
+      expect(auth.status()).toBe(201);
+      const { accessToken, user } = await auth.json();
+      await seedProfile(
+        contexts[i].request,
+        { Authorization: `Bearer ${accessToken}` },
+        {
+          displayName: i === 0 ? "標籤測試甲" : "標籤測試乙",
+          birthDate: "1996-06-15",
+          gender: i === 0 ? "woman" : "man",
+          bio: "本機瀏覽器配對頁標籤測試",
+        },
+      );
+      people.push({ id: user.id, accessToken });
+    }
+    const a = await contexts[0].newPage();
+    await a.goto("/matches");
+    await expect(
+      a.getByRole("heading", { name: "你的下一個火花，還在路上" }),
+    ).toBeVisible();
+    // 主選單只有四項，「我喜歡的」不再是獨立頁面。
+    await expect(a.locator(".side-nav > a, .side-nav > span")).toHaveCount(4);
+    await a.goto("/discover");
+    await expect(a.getByRole("heading", { name: /標籤測試乙/ })).toBeVisible();
+    await a.getByRole("button", { name: "喜歡", exact: true }).click();
+    await a
+      .locator(".side-nav")
+      .getByRole("link", { name: "我的配對" })
+      .click();
+    const tags = a.getByRole("group", { name: "篩選" });
+    const card = a.locator(".match-card", { hasText: "標籤測試乙" });
+    await expect(card.locator(".badge")).toHaveText("我喜歡的");
+    await expect(card).toContainText("今天按下喜歡");
+    await expect(tags.getByRole("button", { name: "全部 1" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(tags.getByRole("button", { name: "已配對 0" })).toBeVisible();
+    // 切到「已配對」：還沒有互相喜歡的人。
+    await tags.getByRole("button", { name: "已配對 0" }).click();
+    await expect(card).toBeHidden();
+    await expect(
+      a.getByRole("heading", { name: "還沒有互相喜歡的人" }),
+    ).toBeVisible();
+    // 切到「我喜歡的」：卡片回來，可以看對方的檔案。
+    await tags.getByRole("button", { name: "我喜歡的 1" }).click();
+    await card.getByRole("button", { name: "看看檔案" }).click();
+    await expect(a.getByRole("dialog")).toContainText("標籤測試乙");
+    await a.getByRole("button", { name: "關閉" }).click();
+    await expect(a.getByRole("dialog")).toBeHidden();
+    // 對方也按了喜歡：不重新整理，卡片就從「我喜歡的」移到「已配對」。
+    await tags.getByRole("button", { name: /^全部/ }).click();
+    const liked = await contexts[1].request.post("/api/v1/interactions", {
+      headers: { Authorization: `Bearer ${people[1].accessToken}` },
+      data: { targetUserId: people[0].id, action: "like" },
+    });
+    expect(liked.status()).toBe(201);
+    await expect(card.locator(".badge")).toHaveText("已配對");
+    await expect(card).toHaveCount(1);
+    await expect(tags.getByRole("button", { name: "已配對 1" })).toBeVisible();
+    await expect(
+      tags.getByRole("button", { name: "我喜歡的 0" }),
+    ).toBeVisible();
+    await card.getByRole("link", { name: "開始聊天" }).click();
+    await expect(a).toHaveURL(/\/messages\//);
+  } finally {
+    await Promise.all(contexts.map((c) => c.close()));
+  }
+});
 test("探索偏好：點軌道會把最近的那顆把手移過去，按住可以直接拖", async ({
   browser,
 }) => {
