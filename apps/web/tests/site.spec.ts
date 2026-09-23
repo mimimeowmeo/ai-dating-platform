@@ -125,6 +125,9 @@ test("建立帳號、儲存檔案與偏好、重新整理恢復登入", async ({
   await page.reload();
   await expect(page.getByLabel("最小年齡")).toHaveValue("22");
   await expect(page.getByLabel("最高身高")).toHaveValue("250");
+  // 個人頁要顯示性別（表單預設「女性」，這個流程沒有改）。
+  await page.goto("/profile");
+  await expect(page.locator(".profile-summary .gender-tag")).toHaveText("女性");
   await page.goto("/verification");
   await expect(
     page.getByRole("heading", { name: "尚未驗證", exact: true }),
@@ -186,14 +189,22 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
     await a.goto("/discover");
     await b.goto("/discover");
     await expect(a.getByRole("heading", { name: /雙人測試乙/ })).toBeVisible();
+    // 每個出現對方的地方都要標性別：探索卡片、側欄新配對、配對卡、對話列表、聊天室標題。
+    await expect(a.locator(".person-card .gender-tag")).toHaveText("男性");
     await a.getByRole("button", { name: "喜歡", exact: true }).click();
     await expect(b.getByRole("heading", { name: /雙人測試甲/ })).toBeVisible();
+    await expect(b.locator(".person-card .gender-tag")).toHaveText("女性");
     await b.getByRole("button", { name: "喜歡", exact: true }).click();
     await expect(b.getByRole("status")).toContainText("互相喜歡");
+    await expect(b.locator(".mini-matches .gender-tag")).toHaveText("女性");
     await a.goto("/matches");
+    await expect(a.locator(".match-card .gender-tag")).toHaveText("男性");
     await a.getByRole("link", { name: "開始聊天" }).click();
+    await expect(a.locator(".conversation .gender-tag")).toHaveText("男性");
+    await expect(a.locator(".chat-header .gender-tag")).toHaveText("男性");
     await b.goto("/matches");
     await b.getByRole("link", { name: "開始聊天" }).click();
+    await expect(b.locator(".chat-header .gender-tag")).toHaveText("女性");
     await a
       .getByRole("textbox", { name: "訊息內容" })
       .fill("你好，這是一段真實的即時對話！");
@@ -455,7 +466,8 @@ test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩
         {
           displayName: i === 0 ? "標籤測試甲" : "標籤測試乙",
           birthDate: "1996-06-15",
-          gender: i === 0 ? "woman" : "man",
+          // 乙用最長的性別標籤「非二元性別」，窄欄位的版面才測得到。
+          gender: i === 0 ? "woman" : "nonbinary",
           bio: "本機瀏覽器配對頁標籤測試，已配對與我喜歡的要分開顯示。",
         },
       );
@@ -489,10 +501,14 @@ test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩
     // 切到「我喜歡的」：卡片出現，可以看對方的檔案。
     await tags.getByRole("button", { name: "我喜歡的 1" }).click();
     await expect(card.locator(".badge")).toHaveText("我喜歡的");
+    await expect(card.locator(".gender-tag")).toHaveText("非二元性別");
     await expect(card).toContainText("今天按下喜歡");
     await card.getByRole("button", { name: "看看檔案" }).click();
     await expect(a.getByRole("dialog")).toContainText("標籤測試乙");
     await expect(a.getByRole("dialog")).toContainText("170 公分");
+    await expect(a.getByRole("dialog").locator(".gender-tag")).toHaveText(
+      "非二元性別",
+    );
     await a.getByRole("button", { name: "關閉" }).click();
     await expect(a.getByRole("dialog")).toBeHidden();
     // 對方也按了喜歡：不重新整理，卡片就從「我喜歡的」移到「已配對」。
@@ -512,6 +528,29 @@ test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩
     await expect(card.locator(".badge")).toHaveText("已配對");
     await card.getByRole("link", { name: "開始聊天" }).click();
     await expect(a).toHaveURL(/\/messages\//);
+    // 窄版面的對話列表：名字不能被性別標籤擠掉，最長的「非二元性別」也不能壓到右邊的時間欄。
+    // 1100px 是平板（列表欄只剩約 40px，標籤固定換行、放不下以省略號收尾）；
+    // 320px 是小手機（列表整頁寬，放不下才換行，名字要完整）。
+    for (const [width, minName] of [
+      [1100, 20],
+      [320, 60],
+    ]) {
+      // 手機寬度下選了對話就只顯示聊天室，回到沒有選取的列表頁才量得到。
+      if (width < 640) await a.goto("/messages");
+      await a.setViewportSize({ width, height: 800 });
+      const row = a.locator(".conversation").first();
+      const rect = async (selector: string) =>
+        (await row.locator(selector).boundingBox())!;
+      const name = await rect("b");
+      const tag = await rect(".gender-tag");
+      const text = await rect(".conversation-text");
+      expect(name.width).toBeGreaterThan(minName);
+      expect(tag.x + tag.width).toBeLessThanOrEqual(text.x + text.width + 1);
+      await expect(row.locator(".gender-tag")).toHaveAttribute(
+        "title",
+        "非二元性別",
+      );
+    }
   } finally {
     await Promise.all(contexts.map((c) => c.close()));
   }

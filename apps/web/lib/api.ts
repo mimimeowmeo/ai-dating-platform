@@ -229,3 +229,6 @@ export const genderLabels: Record<string, string> = {
   nonbinary: "非二元性別",
   any: "不限性別",
 };
+// 某個人的性別（卡片、個人頁用）。"any" 只屬於探索偏好，不會是一個人的性別。
+export const genderText = (gender?: string | null) =>
+  gender && gender !== "any" ? (genderLabels[gender] ?? gender) : "";

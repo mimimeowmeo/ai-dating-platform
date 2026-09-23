@@ -1367,6 +1367,12 @@ input[type="range"] {
 .mini-conversations a:hover b {
   color: var(--primary);
 }
+/* 上面兩組規則會套到所有 span，性別標籤維持 --ink（--muted 在 --page-soft 上對比不足）。 */
+.mini-matches .gender-tag,
+.mini-conversations .gender-tag,
+.mini-matches a:hover .gender-tag {
+  color: var(--ink);
+}
 .side-card > .button {
   margin-top: 16px;
 }
@@ -1424,6 +1430,27 @@ input[type="range"] {
   border: 1px solid var(--line);
   background: var(--page-soft);
   color: var(--ink);
+}
+/* 性別標籤：人物卡片、配對卡、聊天與個人頁共用。外觀同 .badge.soft 小一號，常放在標題裡，所以固定字重。
+   窄欄位（側欄三欄格子約 65px、平板對話列表約 40px）放不下「非二元性別」，所以最多跟容器一樣寬、以省略號收尾，
+   完整文字在 title；內距 6px 讓「女性／男性」剛好放得進 40px。 */
+.gender-tag {
+  display: inline-block;
+  flex-shrink: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--page-soft);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
 }
 .match-copy h2 {
   font-size: 24px;
@@ -1547,10 +1574,10 @@ input[type="range"] {
 .conversation-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
 .conversation b {
+  min-width: 0;
   overflow: hidden;
   font-size: 16px;
   text-overflow: ellipsis;
@@ -1609,7 +1636,16 @@ input[type="range"] {
   flex: 1;
   min-width: 0;
 }
+/* 名字加標籤放不下時（例如 640px 左右），標籤換到下一行，名字不會被擠掉。 */
+.chat-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+}
 .chat-title h2 {
+  min-width: 0;
   overflow: hidden;
   font-size: 18px;
   text-overflow: ellipsis;
@@ -2183,6 +2219,14 @@ input[type="range"] {
   .conversation-list {
     padding: 15px;
   }
+  /* 列表欄 220px 扣掉頭像與時間欄，名字只剩約 40px：名字獨占一行（照舊截斷），性別標籤換到下一行。 */
+  .conversation-top {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .conversation-top b {
+    flex-basis: 100%;
+  }
   .conversation-items {
     gap: 10px;
   }
@@ -2462,6 +2506,10 @@ input[type="range"] {
   }
   .conversation-list {
     min-height: 560px;
+  }
+  /* 手機的對話列表是整頁寬：名字放得下就跟性別標籤同一行，放不下（例如 320–360px）標籤才換到下一行。 */
+  .conversation-top b {
+    flex-basis: auto;
   }
   .chat-layout .avatar:not(.md):not(.sm) {
     width: 52px;

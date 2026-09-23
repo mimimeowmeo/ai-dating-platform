@@ -44,6 +44,7 @@ import {
   send,
   useAuth,
   genderLabels,
+  genderText,
   type Card,
   type Profile,
   type Preferences,
@@ -895,10 +896,22 @@ function Heading({
     </div>
   );
 }
+// 每張人物卡片與個人頁都標出性別；沒有資料時不留空標籤。
+// 刻意不用 .badge：配對卡的測試以 .badge 找「已配對／我喜歡的」，多一個會撞在一起。
+// 窄欄位會以省略號截斷，title 讓滑過時看得到完整文字。
+function GenderTag({ gender }: { gender?: string | null }) {
+  const label = genderText(gender);
+  return label ? (
+    <span className="gender-tag" title={label}>
+      {label}
+    </span>
+  ) : null;
+}
 type Person = Pick<
   Card,
   | "displayName"
   | "age"
+  | "gender"
   | "city"
   | "heightCm"
   | "bio"
@@ -926,6 +939,7 @@ function PersonCard({
         <h2>
           {person.displayName}
           <span>{person.age}</span>
+          <GenderTag gender={person.gender} />
           {person.isVerified && (
             <ShieldCheck size={24} aria-label="已通過驗證" />
           )}
@@ -1116,6 +1130,7 @@ function DiscoverAside() {
                 <Link href={`/messages/${m.conversationId}`}>
                   <Portrait person={m.otherUser} />
                   <span>{m.otherUser.displayName}</span>
+                  <GenderTag gender={m.otherUser.gender} />
                 </Link>
               </li>
             ))}
@@ -1134,7 +1149,10 @@ function DiscoverAside() {
             {conversations.data.slice(0, 3).map((c) => (
               <li key={c.id}>
                 <Link href={`/messages/${c.id}`}>
-                  <b>{c.otherUser.displayName}</b>
+                  <b>
+                    {c.otherUser.displayName}{" "}
+                    <GenderTag gender={c.otherUser.gender} />
+                  </b>
                   <span>{c.lastMessage?.content || "從一句你好開始吧。"}</span>
                 </Link>
               </li>
@@ -1315,7 +1333,7 @@ function ProfileView({
         <div className="profile-summary">
           <span className="eyebrow">MY PROFILE</span>
           <h2>
-            {p.displayName}，{person.age}
+            {p.displayName}，{person.age} <GenderTag gender={p.gender} />
           </h2>
           <p className="profile-city">
             {[p.city, p.heightCm && `${p.heightCm} 公分`]
@@ -2117,7 +2135,8 @@ function MatchesPage() {
                       {fresh}
                     </p>
                     <h2>
-                      {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                      {m.otherUser.displayName} <span>{m.otherUser.age}</span>{" "}
+                      <GenderTag gender={m.otherUser.gender} />
                     </h2>
                     <p>
                       {m.otherUser.bio ||
@@ -2185,7 +2204,8 @@ function MatchesPage() {
                     {likedLabel(l.createdAt)}
                   </p>
                   <h2>
-                    {l.user.displayName} <span>{l.user.age}</span>
+                    {l.user.displayName} <span>{l.user.age}</span>{" "}
+                    <GenderTag gender={l.user.gender} />
                   </h2>
                   <p>
                     {l.user.bio ||
@@ -2297,6 +2317,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                     <div className="conversation-text">
                       <div className="conversation-top">
                         <b>{c.otherUser.displayName}</b>
+                        <GenderTag gender={c.otherUser.gender} />
                       </div>
                       <p>{c.lastMessage?.content || "從一句你好開始吧。"}</p>
                     </div>
@@ -2578,7 +2599,10 @@ function Chat({
           <ChevronLeft />
         </Link>
         <div className="chat-title">
-          <h2>{c.otherUser.displayName}</h2>
+          <div className="chat-name">
+            <h2>{c.otherUser.displayName}</h2>
+            <GenderTag gender={c.otherUser.gender} />
+          </div>
           <small className={online ? "presence online" : "presence"}>
             {online ? "上線" : "離線"}
           </small>
