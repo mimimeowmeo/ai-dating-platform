@@ -40,16 +40,24 @@ AI_INTERNAL_TOKEN='<測試 token>' .venv/bin/python -m tests.integration_http
 `POST /internal/ai/face/verify`，header `X-Internal-Token`，JSON：
 
 ```json
-{"imageBase64":"<base64>","mimeType":"image/jpeg","requestId":"<UUID>"}
+{
+  "imageBase64": "<base64>", "mimeType": "image/jpeg", "requestId": "<UUID>",
+  "referenceImages": [{"imageBase64": "<base64>", "mimeType": "image/jpeg"}],
+  "liveCapture": {"challengeId": "<UUID>", "frames": [{"action": "turn_left", "imageBase64": "<base64>", "mimeType": "image/jpeg"}]}
+}
 ```
 
-JPEG、PNG、WebP 必須完整解碼成功，宣告 MIME 須符合實際格式，只接受單張影像，5 MiB 以下、每邊 64–4096 像素、最多 1600 萬像素。不保存檔案、不提供自拍 URL、不記錄影像、EXIF 或生物特徵。格式錯誤回 400/422；輸入大小超限回 413/422；所有驗證錯誤回應不包含原始輸入。
+`liveCapture` 只在即時鏡頭驗證時出現：`imageBase64` 是正面影格，`frames` 是每個動作各一張（`turn_left`、`turn_right`、`look_up`、`look_down`，最多 3 張、每張 1 MiB），錯誤碼加上 `FRAME_` 前綴。轉給 provider 時沒有 `liveCapture` 就省略這個欄位。
+
+`referenceImages` 是身分參照（使用者的第一張主照片），最多 1 張、1 MiB 以下。NestJS 固定送 1 張：使用者沒有照片時 API 直接回 409 `AVATAR_REQUIRED`，不會呼叫這裡。欄位仍可省略（預設空陣列），交給 provider 判斷。
+
+JPEG、PNG、WebP 必須完整解碼成功，宣告 MIME 須符合實際格式，只接受單張影像，5 MiB 以下、每邊 64–4096 像素、最多 1600 萬像素；參照照片套用相同規則，錯誤碼加上 `REFERENCE_` 前綴（例如 `REFERENCE_INVALID_IMAGE`）。不保存檔案、不提供自拍 URL、不記錄影像、EXIF 或生物特徵。格式錯誤回 400/422；輸入大小超限回 413/422；所有驗證錯誤回應不包含原始輸入。
 
 回應包含 `status, reasonCode, modelName, modelVersion` 與可選的 `livenessScore, faceMatchScore`。無模型的 modelName/modelVersion 為 null。Provider 逾時、連線錯誤、重導向、格式錯誤一律 `unavailable`，不會退回模擬成功。
 
 ## Provider 的明確契約
 
-傳給 provider 的輸入與上述相同，認證為 `Authorization: Bearer <token>`。回應必須為 HTTP 200、`application/json`，完整回應最多 16 KiB，整個請求最多 10 秒。未配置時不對外連線。
+傳給 provider 的輸入與上述相同（含 `referenceImages`），認證為 `Authorization: Bearer <token>`。專案內建一個自架 provider：[`services/face`](../face/README.md)。回應必須為 HTTP 200、`application/json`，完整回應最多 16 KiB，整個請求最多 10 秒。未配置時不對外連線。
 
 Provider 除了上述 API 欄位，還必須回：
 
@@ -82,7 +90,8 @@ Provider 除了上述 API 欄位，還必須回：
 
 ## 已執行驗證
 
-- 24 項 unittest 在本機 Python 3.14 與 Docker Python 3.12 均通過。
+- 真人驗證 30 項 unittest（2026-09-23 加入 `referenceImages` 後）在本機 Python 3.14 與 Docker Python 3.12 均通過。
+- 2026-09-23 接上自架 provider（`services/face`）做端對端檢查：API 讀主照片 → AI 服務 → provider，驗證紀錄正確寫入狀態、代碼、兩個分數與模型版本，`isVerified` 未被設成 true。
 - Docker 映像建置成功；真實 Uvicorn HTTP 測試確認 `/health`、401、有效 token 與無模型回應。
 - 隔離 Redis 的整合測試確認 Python BullMQ worker 實際取出並完成工作，工作影像已從 Redis job data 去除。
 - 獨立 worker 程序的 heartbeat 在 Redis 正常時通過；停止 Redis 後檢查失敗，符合預期。
@@ -149,5 +158,5 @@ REDIS_URL=redis://127.0.0.1:6379/0 .venv/bin/python -m tests.integration_reply_q
 - `tests/test_reply_*.py`：63 項單元測試，全部用 Pydantic AI 的 `FunctionModel` 與假的向量服務，**不會連網、不花額度**。
 - `tests/live_reply_smoke.py`：手動執行、會呼叫**真的模型**（Ollama／Gemini，依 `.env` 設定），用來確認模型真的接上；不會被自動執行。
 - `tests/integration_reply_queue.py`：真實 Redis 的 BullMQ 串接測試（用唯一 queue 名稱，結束時只清掉自己的 queue）。
-- 2026-09-23 本機 Python 3.14：87 項單元測試（含真人驗證 24 項）與 Redis 整合測試全數通過；
+- 2026-09-23 本機 Python 3.14 與 Docker Python 3.12：108 項單元測試（含真人驗證 30 項）全數通過；Redis 整合測試在加入 `referenceImages` 前通過；
   `live_reply_smoke.py` 實測 Ollama Cloud（gemma4:31b）與 Gemini 向量化正常。

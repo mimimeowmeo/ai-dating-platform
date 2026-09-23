@@ -15,6 +15,9 @@ dist/
 *.tsbuildinfo
 *.log
 
+# 即時框臉用的 MediaPipe WASM 與模型；dev／build 前由 apps/web/scripts/prepare-mediapipe.mjs 產生。
+apps/web/public/mediapipe/
+
 # 測試產物。
 coverage/
 playwright-report/

@@ -12,8 +12,9 @@ import {
   UseGuards,
   UseInterceptors,
   UploadedFile,
+  UploadedFiles,
 } from "@nestjs/common";
-import { FileInterceptor } from "@nestjs/platform-express";
+import { FileInterceptor, FilesInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import { z } from "zod";
 import {
@@ -31,6 +32,10 @@ import { Social } from "./social";
 import { ReplySuggestions } from "./ai-reply";
 const upload = FileInterceptor("file", {
   limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+});
+// 即時鏡頭的影格：欄位名稱 frames，最多 4 張（正面 1 張＋最多 3 個動作），每張 8 MB 以內。
+const liveUpload = FilesInterceptor("frames", 4, {
+  limits: { fileSize: 8 * 1024 * 1024, files: 4 },
 });
 @Controller()
 export class HealthController {
@@ -118,16 +123,58 @@ export class ProductController {
   @Put("me/foods") setFoods(@Req() r: AuthRequest, @Body() b: unknown) {
     return this.profiles.setTags(r.userId, "foods", b);
   }
+  /**
+   * GET /verification/status：查詢自己的真人驗證狀態。
+   * 回傳最近一筆驗證紀錄，以及 canVerify（已上傳第一張大頭貼才是 true）；
+   * 前端依 canVerify 決定要不要顯示真人驗證區塊。
+   */
   @Get("verification/status") verification(@Req() r: AuthRequest) {
+    // r.userId 是登入 token 解出來的使用者編號（這個 controller 掛了 AuthGuard，未登入進不來）。
     return this.profiles.verification(r.userId);
   }
+  /**
+   * POST /onboarding/selfie：上傳自拍做真人驗證（multipart 表單，欄位名稱 file）。
+   * 還沒上傳大頭貼會回 409 AVATAR_REQUIRED；檔案超過 8 MB 由 upload 攔截器回 413。
+   */
   @Post("onboarding/selfie") @UseInterceptors(upload) selfie(
+    // 已登入的請求，帶有使用者編號。
     @Req() r: AuthRequest,
+    // upload 攔截器（multer）解析出來的檔案；沒附檔案時是 undefined，由 verifySelfie 回 400。
     @UploadedFile() file: Express.Multer.File,
   ) {
+    // 交給 Profiles.verifySelfie：檢查大頭貼、限制次數、整理自拍、呼叫 AI 服務、寫入結果。
     return this.profiles.verifySelfie(r.userId, file);
   }
+  /**
+   * POST /verification/challenge：開始即時鏡頭驗證，領一份隨機的動作挑戰（120 秒內有效、只能用一次）。
+   * 還沒上傳大頭貼會回 409 AVATAR_REQUIRED。
+   */
+  @Post("verification/challenge") challenge(@Req() r: AuthRequest) {
+    // 交給 Profiles.createChallenge：檢查大頭貼、限制次數、抽動作、存進 Redis。
+    return this.profiles.createChallenge(r.userId);
+  }
+  /**
+   * POST /onboarding/live：送出即時鏡頭拍下的影格（multipart 表單）。
+   * 欄位 challengeId 是挑戰編號；欄位 frames 依序放「正面影格」與每個動作各一張。
+   * liveUpload 攔截器最多收 4 張、每張 8 MB 以內，超過回 413／400。
+   */
+  @Post("onboarding/live") @UseInterceptors(liveUpload) live(
+    // 已登入的請求，帶有使用者編號。
+    @Req() r: AuthRequest,
+    // liveUpload 攔截器（multer）解析出來的影格陣列；沒附檔案時是 undefined。
+    @UploadedFiles() files: Express.Multer.File[],
+    // 表單裡的文字欄位（challengeId）；由 verifyLive 檢查格式。
+    @Body() body: unknown,
+  ) {
+    // 交給 Profiles.verifyLive：核對挑戰、整理影格、呼叫 AI 服務、寫入結果。
+    return this.profiles.verifyLive(r.userId, files, body);
+  }
+  /**
+   * POST /verification/retry：按「重新驗證」。
+   * 不寫資料庫，只回傳接下來要做什麼（先上傳大頭貼，或用鏡頭即時驗證）。
+   */
   @Post("verification/retry") retry(@Req() r: AuthRequest) {
+    // 交給 Profiles.retry 判斷目前能不能驗證。
     return this.profiles.retry(r.userId);
   }
   @Get("discovery") discovery(@Req() r: AuthRequest) {

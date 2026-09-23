@@ -57,6 +57,11 @@ import {
 } from "@/lib/api";
 import { HeartIcon, LogoMark } from "@/components/icons";
 import {
+  LiveVerification,
+  verificationMessage,
+  type VerificationState,
+} from "@/components/live-verification";
+import {
   categoryTitle,
   datingGoalLimit,
   groupTraits,
@@ -595,9 +600,13 @@ function SidebarUser({ user }: { user: User }) {
       <span>{profile.data?.displayName || user.email.split("@")[0]}</span>
       <span className="side-user-status">
         {" · "}
-        <Link href="/verification">
-          {user.isVerified ? "已驗證" : "尚未驗證"}
-        </Link>
+        {profile.data?.photos.length ? (
+          <Link href="/verification">
+            {user.isVerified ? "已驗證" : "尚未驗證"}
+          </Link>
+        ) : (
+          <span>{user.isVerified ? "已驗證" : "尚未驗證"}</span>
+        )}
       </span>
     </p>
   );
@@ -1313,9 +1322,12 @@ function ProfileView({
       >
         預覽公開頁面
       </button>
-      <Link className="button secondary" href="/verification">
-        {user.isVerified ? "已通過真人驗證" : "前往真人驗證"}
-      </Link>
+      {/* 真人驗證拿第一張照片比對，還沒有照片時不顯示入口。 */}
+      {p.photos.length > 0 && (
+        <Link className="button secondary" href="/verification">
+          {user.isVerified ? "已通過真人驗證" : "前往真人驗證"}
+        </Link>
+      )}
     </div>
   );
   return (
@@ -1401,6 +1413,7 @@ function ProfileForm({
   onCancel?: () => void;
 }) {
   const client = useQueryClient();
+  const user = useAuth((s) => s.user);
   const form = useForm({
     defaultValues: {
       displayName: profile?.displayName ?? "",
@@ -1669,7 +1682,14 @@ function ProfileForm({
                   className="photo-delete"
                   aria-label="刪除照片"
                   onClick={async () => {
-                    if (!window.confirm("確定刪除這張照片？")) return;
+                    if (
+                      !window.confirm(
+                        photo.isAvatar && user?.isVerified
+                          ? "確定刪除這張主照片？真人驗證是用這張比對的，刪除後驗證標記會取消，要用新的大頭貼重新驗證。"
+                          : "確定刪除這張照片？",
+                      )
+                    )
+                      return;
                     try {
                       await api(`/profile/photos/${photo.id}`, {
                         method: "DELETE",
@@ -1677,6 +1697,13 @@ function ProfileForm({
                       await client.invalidateQueries({
                         queryKey: ["/profile"],
                       });
+                      if (photo.isAvatar) {
+                        await client.invalidateQueries({
+                          queryKey: ["/verification/status"],
+                        });
+                        const me = await api<User>("/auth/me");
+                        useAuth.getState().set(useAuth.getState().token, me);
+                      }
                     } catch (e) {
                       setError((e as Error).message);
                     }
@@ -1711,12 +1738,16 @@ function ProfileForm({
           <ShieldCheck />
           <h3>讓真實，多一份安心。</h3>
           <p className="muted">
-            查看你的驗證狀態。只有完成真人驗證，才會顯示驗證標記。
+            {profile?.photos.length
+              ? "查看你的驗證狀態。只有完成真人驗證，才會顯示驗證標記。"
+              : "上傳第一張照片（大頭貼）後，就能開始真人驗證。"}
           </p>
-          <Link href="/verification" className="text-link">
-            查看真人驗證
-            <ArrowRight size={16} />
-          </Link>
+          {!!profile?.photos.length && (
+            <Link href="/verification" className="text-link">
+              查看真人驗證
+              <ArrowRight size={16} />
+            </Link>
+          )}
         </section>
       </aside>
     </div>
@@ -1941,29 +1972,26 @@ function PreferencesPage() {
   );
 }
 function VerificationPage() {
-  const q = useData<{
-    status: string;
-    reasonCode?: string;
-    modelName?: string;
-    createdAt?: string;
-  }>("/verification/status");
+  const q = useData<VerificationState>("/verification/status");
+  const profile = useData<Profile | null>("/profile");
   const client = useQueryClient();
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const labels: Record<string, string> = {
     not_started: "尚未驗證",
     pending: "驗證處理中",
     verified: "已通過驗證",
     rejected: "未通過驗證",
-    unavailable: "驗證服務尚未就緒",
+    unavailable: "這次無法完成驗證",
   };
+  // 和後端挑選比對對象的規則一致：主照片優先，其次是排在最前面的照片。
+  const photos = profile.data?.photos ?? [];
+  const avatar = photos.find((p) => p.isAvatar) ?? photos[0];
+  const message = verificationMessage(q.data);
   return (
     <>
       <Heading
         overline="TRUST STARTS WITH HONESTY"
         title="真人驗證"
-        text="多一點真實，多一份安心。真人驗證包含身分比對與活體判斷，上傳照片本身不代表通過驗證。"
+        text="打開鏡頭、跟著提示轉頭或抬頭，確認是本人當下在鏡頭前，再和你的大頭貼比對。"
       />
       <section className="panel narrow">
         <div className="verification-status">
@@ -1972,74 +2000,46 @@ function VerificationPage() {
           </div>
           <span className="eyebrow">YOUR VERIFICATION</span>
           <h2>{labels[q.data?.status || "not_started"]}</h2>
-          {q.data?.status === "unavailable" && (
-            <p className="muted">
-              目前尚未接入可用的真人驗證模型，你的帳號仍為未驗證。
+          {message && (
+            <p className={q.data?.status === "verified" ? "success" : "muted"}>
+              {message}
             </p>
-          )}
-          {q.data?.status === "rejected" && (
-            <p className="muted">請確認照片清晰且為本人，然後重新上傳。</p>
-          )}
-          {q.data?.status === "verified" && (
-            <p className="success">你的驗證已完成。</p>
           )}
         </div>
         <div className="divider" />
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!file) return;
-            setBusy(true);
-            setError("");
-            try {
-              const data = new FormData();
-              data.append("file", file);
-              await api("/onboarding/selfie", { method: "POST", body: data });
-              await client.invalidateQueries({
-                queryKey: ["/verification/status"],
-              });
-              const me = await api<User>("/auth/me");
-              useAuth.getState().set(useAuth.getState().token, me);
-            } catch (e) {
-              setError((e as Error).message);
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <label>
-            選擇清晰的本人自拍
-            <input
-              required
-              type="file"
-              accept="image/jpeg,image/png,image/webp"
-              onChange={(e) => {
-                const picked = e.target.files?.[0] || null;
-                if (picked && picked.size > photoLimit) {
-                  setError(photoTooLarge);
-                  setFile(null);
-                  e.target.value = "";
-                  return;
-                }
-                setError("");
-                setFile(picked);
+        {q.data && !q.data.canVerify ? (
+          <div className="verification-gate">
+            <p className="muted">
+              真人驗證會拿你的第一張照片（大頭貼）來比對，請先上傳一張本人清楚的正面照。
+            </p>
+            <Link className="button" href="/profile">
+              前往上傳大頭貼
+              <ArrowRight size={18} />
+            </Link>
+          </div>
+        ) : q.data ? (
+          <>
+            {avatar && (
+              <figure className="verification-avatar">
+                <img src={avatar.url} alt="用來比對的大頭貼" />
+                <figcaption className="muted">
+                  會和這張大頭貼比對。要換大頭貼，請到個人檔案刪除這張，排在下一張的照片會自動遞補；換過大頭貼要重新驗證。
+                </figcaption>
+              </figure>
+            )}
+            <LiveVerification
+              onFinished={async () => {
+                await client.invalidateQueries({
+                  queryKey: ["/verification/status"],
+                });
+                const me = await api<User>("/auth/me");
+                useAuth.getState().set(useAuth.getState().token, me);
               }}
             />
-            <small>JPEG、PNG、WebP，最大 8 MB；不會顯示在公開檔案。</small>
-          </label>
-          <p className="muted">
-            此開發版本僅在本次請求中處理自拍，不保存原始影像。正式身分驗證與資料政策尚待設定。
-          </p>
-          <label className="check-label">
-            <input type="checkbox" required />
-            我同意使用這張自拍進行本次驗證處理。
-          </label>
-          <ErrorText message={error || q.error?.message} />
-          <button className="button" disabled={busy || !file}>
-            {busy ? "處理中…" : "提交驗證"}
-            <ShieldCheck size={18} />
-          </button>
-        </form>
+          </>
+        ) : (
+          <ErrorText message={q.error?.message} />
+        )}
       </section>
     </>
   );
