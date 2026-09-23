@@ -54,6 +54,7 @@ async function bootstrap() {
     logger: ["log", "warn", "error"],
   });
   // 前提是請求只經過一層代理；若把 API 埠直接公開，使用者就能偽造 X-Forwarded-For。
+  // nginx 前面還有 cloudflared 時，由 nginx 還原來源位址（infrastructure/nginx/client-ip/）。
   app.set("trust proxy", 1);
   app.setGlobalPrefix("api/v1");
   app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));

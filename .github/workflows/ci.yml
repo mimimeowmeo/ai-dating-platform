@@ -23,6 +23,16 @@ jobs:
       - run: pnpm test
         env:
           TEST_API_URL: http://127.0.0.1:8080/api/v1
+      # 內部測試站（cloudflared → nginx）用 NGINX_CLIENT_IP=cloudflare-tunnel，
+      # 切到那個模式重跑來源 IP 測試，再切回預設給 e2e 用。
+      - run: docker compose -f docker-compose.ci.yml up -d --wait nginx
+        env:
+          NGINX_CLIENT_IP: cloudflare-tunnel
+      - run: node scripts/with-env.mjs pnpm --filter @dating/api exec node --test test/client-ip.test.mjs
+        env:
+          NGINX_CLIENT_IP: cloudflare-tunnel
+          TEST_API_URL: http://127.0.0.1:8080/api/v1
+      - run: docker compose -f docker-compose.ci.yml up -d --wait nginx
       - run: pnpm --filter @dating/web exec playwright install --with-deps chromium
       # 上一步的 integration 測試與接下來的 e2e 共用同一個來源 IP，
       # 合計建立的帳號數會超過註冊限流的 20 次／5 分鐘
