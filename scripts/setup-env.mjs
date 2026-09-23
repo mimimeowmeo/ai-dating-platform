@@ -39,6 +39,8 @@ ensure("S3_BUCKET", "dating-media");
 ensure("JWT_SECRET", secret());
 ensure("AI_INTERNAL_URL", "http://127.0.0.1:8000");
 ensure("AI_INTERNAL_TOKEN", secret());
+// 只產生 token；provider URL 維持空白，要啟用自架 provider 時再手動設定（見 .env.example）。
+ensure("AI_VERIFICATION_PROVIDER_TOKEN", secret());
 ensure("WEB_ORIGIN", "http://localhost:8080");
 ensure("APP_PORT", "8080");
 ensure("PORT", "3001");

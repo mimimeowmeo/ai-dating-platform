@@ -53,7 +53,9 @@ Base path: `/api/v1`
 
 ## Verification
 
-- `POST /onboarding/selfie`
+- `POST /verification/challenge`（即時鏡頭：領隨機動作挑戰）
+- `POST /onboarding/live`（即時鏡頭：送出正面與動作影格）
+- `POST /onboarding/selfie`（舊流程：上傳自拍檔）
 - `GET /verification/status`
 - `POST /verification/retry`
 

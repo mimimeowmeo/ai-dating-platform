@@ -1,0 +1,5 @@
+# 只在 Docker build 的 models 階段使用（MiniFASNet .pth → ONNX 與一致性檢查），不進執行期映像。
+# torch 另外從 PyTorch 的 CPU 套件庫安裝，見 Dockerfile。
+numpy==2.3.5
+onnx==1.17.0
+onnxruntime==1.30.0

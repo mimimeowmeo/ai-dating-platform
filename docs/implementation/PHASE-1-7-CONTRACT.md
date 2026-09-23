@@ -33,12 +33,23 @@
 
 ## 真人驗證
 
-- `POST /onboarding/selfie` multipart `file` → Verification。
-- `GET /verification/status` → Verification；`POST /verification/retry` → Verification。
-- Verification：`{id?,status,reasonCode?,modelName?,modelVersion?,createdAt?}`；狀態 `not_started | pending | verified | rejected | unavailable`。
-- API 將影像透過私有 HTTP 傳至 AI `/internal/ai/face/verify`，`X-Internal-Token` 驗證；JSON `{imageBase64,mimeType,requestId}`。回應 `{status,reasonCode,modelName,modelVersion,livenessScore?,faceMatchScore?}`。
+- 前端的真人驗證用即時鏡頭：
+  - `POST /verification/challenge` → `{challengeId,actions,expiresInSeconds}`：從 `turn_left | turn_right | look_up | look_down` 隨機抽 2 個不同動作，存在 Redis（`verify-challenge:<id>`，120 秒失效、只能用一次）。沒有照片回 `409 AVATAR_REQUIRED`；每人每小時 10 次，這個小時的驗證次數（5 次）已用完時也先回 `429 RATE_LIMIT`。方向以使用者自己為準（`turn_left`＝往自己的左邊轉頭）。
+  - `POST /onboarding/live` multipart：`challengeId` ＋ `frames`（依序是正面影格、每個動作各一張，數量＝動作數＋1，最多 4 張、每張 8 MB）→ Verification。挑戰用 `GETDEL` 讀出即刪；不存在、過期或不是自己的回 `409 CHALLENGE_EXPIRED`，缺編號回 `400 CHALLENGE_REQUIRED`，張數不對回 `400 INVALID_FRAMES`。影格縮到 1024px、1 MiB 內，和上傳自拍共用每小時 5 次的驗證次數。
+- `POST /onboarding/selfie` multipart `file` → Verification（舊流程，前端已改用即時鏡頭）。還沒上傳任何照片時回 `409 AVATAR_REQUIRED`（在次數限制之前檢查，不建立紀錄、不呼叫 AI）。
+- `GET /verification/status` → Verification；`POST /verification/retry` → Verification（retry 不寫資料庫，有大頭貼回 `LIVE_CAPTURE_REQUIRED`，表示要走即時鏡頭；沒有回 `AVATAR_REQUIRED`）。
+- Verification：`{id?,status,reasonCode?,modelName?,modelVersion?,createdAt?,canVerify}`；狀態 `not_started | pending | verified | rejected | unavailable`。`canVerify` 在使用者已上傳第一張照片（大頭貼）時為 `true`，前端依它決定是否顯示真人驗證區塊；從沒驗證過且沒有照片時 `reasonCode` 為 `AVATAR_REQUIRED`；通過驗證後刪掉（換掉）大頭貼時回 `not_started / AVATAR_CHANGED`。不回傳活體與比對分數。
+- 比對對象只有「第一張主照片」：`isAvatar` 優先，其次 `displayOrder`、`createdAt` 最前面的一張。
+- API 將影像透過私有 HTTP 傳至 AI `/internal/ai/face/verify`，`X-Internal-Token` 驗證；JSON `{imageBase64,mimeType,requestId,referenceImages,liveCapture?}`。`referenceImages` 是身分參照：上述第一張主照片（固定 1 張，API 先縮到 800px 內、1 MiB 以內）。即時鏡頭時 `imageBase64` 是正面影格，`liveCapture` 是 `{challengeId,frames:[{action,imageBase64,mimeType}]}`（最多 3 張、每張 1 MiB）。回應 `{status,reasonCode,modelName,modelVersion,livenessScore?,faceMatchScore?}`。
+- 主照片從物件儲存讀取失敗時不呼叫 AI，記錄 `unavailable / REFERENCE_PHOTO_UNAVAILABLE`；縮到 800px 後短邊不到 64px（例如很寬的橫幅照）記錄 `unavailable / REFERENCE_PHOTO_TOO_SMALL`。兩者都不改變 `isVerified`。AI 服務拒收影像（HTTP 400）時記錄 `unavailable` 加上它回的錯誤碼（例如 `FRAME_IMAGE_TOO_LARGE`、`REFERENCE_INVALID_IMAGE`）。
 - 無設定的模型回 `unavailable / MODEL_NOT_CONFIGURED`，不得回 verified。
-- 只有 `verified`／`rejected` 會更新使用者的 `isVerified`；`unavailable`（未接模型、逾時、服務中斷）只寫入紀錄，不改變既有驗證狀態。
+- 自架 provider（`services/face`，預設不啟動，政策版本 3）：
+  - 只有上傳的自拍檔（沒有 `liveCapture`）無法證明是活人當下拍攝：比對不符、疑似翻拍、找不到臉回 `rejected`；全部通過也只回 `unavailable / LIVE_CAPTURE_REQUIRED`。
+  - 即時鏡頭：每張動作影格用 YuNet 的 5 個點重算頭部角度（在兩眼連線座標系計算，歪頭或轉照片不影響），和正面影格比較；動作沒做到、側傾變化超過 15°、或正面影格沒有正對鏡頭，回 `rejected / CHALLENGE_FAILED`；動作影格和正面不是同一人回 `FACE_CHANGED_DURING_CAPTURE`；動作影格的臉有問題回 `ACTION_*`。之後每張影格都做被動防偽，再做大頭貼比對，全部通過才回 `verified / VERIFICATION_PASSED`。
+  - 主照片沒有臉、多張臉或臉太小回 `unavailable / REFERENCE_*`（問題在照片，不撤銷既有的驗證狀態）。
+  - 動作挑戰只擋得住呈現攻擊（拿照片、螢幕、預錄影片對著鏡頭），擋不住繞過前端直接送出事先準備好的影格（注入攻擊）。
+- 只有 `verified`／`rejected` 會更新使用者的 `isVerified`；`unavailable`（未接模型、逾時、服務中斷）只寫入紀錄，不改變既有驗證狀態。寫入前在使用者鎖內確認大頭貼沒換過，換過就改記 `unavailable / AVATAR_CHANGED`。
+- 刪除大頭貼（主照片）時同時把 `isVerified` 設為 false：驗證比對的是那張照片，換了就要重新驗證。
 
 ## 探索與配對
 

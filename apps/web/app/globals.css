@@ -2156,6 +2156,135 @@ input[type="range"] {
 .verification-status + form label {
   margin: 15px 0;
 }
+.verification-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+.verification-avatar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 20px;
+}
+.verification-avatar img {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--line);
+}
+.verification-avatar figcaption {
+  font-size: 13px;
+  line-height: 1.7;
+}
+/* 即時鏡頭：預覽畫面左右鏡像（像照鏡子），拍下的影格則是原始畫面。 */
+.live-verification {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.live-stage {
+  position: relative;
+  display: none;
+  overflow: hidden;
+  width: 100%;
+  max-width: 480px;
+  aspect-ratio: 3 / 4;
+  margin: 0 auto;
+  border-radius: var(--radius);
+  background: #000;
+}
+.live-stage.on {
+  display: block;
+}
+.live-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+}
+.live-oval {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  height: 70%;
+  aspect-ratio: 3 / 4;
+  transform: translateX(-50%);
+  border: 3px solid rgb(255 255 255 / 0.85);
+  border-radius: 50%;
+  box-shadow: 0 0 0 999px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+}
+.live-arrow {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  transform: translateX(-50%);
+}
+.live-hint {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 15px;
+  text-align: center;
+}
+.live-hint:empty {
+  display: none;
+}
+.live-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.live-steps li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.live-steps li span {
+  font-weight: 600;
+}
+.live-steps li.current {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.live-steps li.done {
+  border-color: var(--primary-soft);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.live-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
 .notification {
   display: flex;
   align-items: center;

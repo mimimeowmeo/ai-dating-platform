@@ -1,0 +1,13 @@
+**
+!services/
+!services/face/
+!services/face/requirements.txt
+!services/face/requirements-export.txt
+!services/face/app/
+!services/face/app/*.py
+!services/face/tools/
+!services/face/tools/*.py
+!services/face/third_party/
+!services/face/third_party/**
+**/__pycache__
+**/*.pyc
