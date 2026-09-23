@@ -388,11 +388,24 @@ check(
       `select count(*) from blocks where user_id='${userId}' and blocked_user_id='${other.id}'`,
     ) === "0",
 );
+const removedStatus = (
+  await call(`/profile/photos/${photo.data.id}`, { method: "DELETE", token })
+).status;
+const removedRow = db(
+  `select (deleted_at is not null)||'|'||is_avatar from user_photos where id='${photo.data.id}'`,
+);
 check(
-  "DELETE /profile/photos/:id",
-  (await call(`/profile/photos/${photo.data.id}`, { method: "DELETE", token }))
-    .status === 200 &&
-    db(`select count(*) from user_photos where id='${photo.data.id}'`) === "0",
+  "DELETE /profile/photos/:id → 軟刪除：user_photos.deleted_at 有值、is_avatar=false，記錄保留",
+  removedStatus === 200 && removedRow === "true|false",
+  removedRow,
+);
+const removedMedia = await call(photo.data.url.replace("/api/v1", ""), {
+  raw: true,
+});
+check(
+  "軟刪除後 GET /media/:id → 404",
+  removedMedia.status === 404,
+  `${removedMedia.status}`,
 );
 check(
   "DELETE /matches/:id → matches.status=unmatched",

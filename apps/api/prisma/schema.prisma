@@ -120,6 +120,8 @@ model Photo {
   isAvatar Boolean @default(false) @map("is_avatar")
   displayOrder Int @default(0) @map("display_order")
   createdAt DateTime @default(now()) @map("created_at")
+  // 軟刪除：刪除或替換主照片時只標記時間，記錄與 MinIO 物件都保留；有值的照片不會出現在任何 API 回應。
+  deletedAt DateTime? @map("deleted_at")
   @@index([userId])
   @@map("user_photos")
 }
