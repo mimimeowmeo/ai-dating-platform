@@ -625,6 +625,7 @@ test("探索偏好：點軌道會把最近的那顆把手移過去，按住可�
     await context.close();
   }
 });
+// 只用兩個帳號：CI 的 e2e 共用註冊限流（20 次／5 分鐘），整套已經用掉 18 次。
 test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜尋自己以外的全部使用者，任何狀態都能重新按喜歡／略過", async ({
   browser,
 }, info) => {
@@ -633,20 +634,22 @@ test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜�
     "多人流程在桌面執行，手機版面由拉桿與 RWD 測試涵蓋。",
   );
   const base = process.env.E2E_BASE_URL || "http://localhost:8080";
-  const contexts = await Promise.all(
-    [0, 1, 2, 3].map(() => browser.newContext({ baseURL: base })),
-  );
+  const contexts = [
+    await browser.newContext({ baseURL: base }),
+    await browser.newContext({ baseURL: base }),
+  ];
   // 名稱帶亂數，避免撞到資料庫裡其他人。
   const tag = randomUUID().slice(0, 8);
-  const names = [
-    `搜尋甲${tag}`,
-    `搜尋乙${tag}`,
-    `搜尋丙${tag}`,
-    `搜尋丁${tag}`,
-  ];
+  const names = [`搜尋甲${tag}`, `搜尋乙${tag}`];
+  const profile = (i: number) => ({
+    displayName: names[i],
+    birthDate: "1996-06-15",
+    gender: i === 0 ? "woman" : "man",
+    bio: "本機瀏覽器測試用搜尋列，用名稱或 email 找到人再按喜歡。",
+  });
   try {
     const people: { id: string; email: string; accessToken: string }[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 2; i++) {
       const email = newEmail();
       const auth = await contexts[i].request.post("/api/v1/auth/register", {
         data: { email, password: `Safe-${randomUUID()}` },
@@ -656,23 +659,33 @@ test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜�
       await seedProfile(
         contexts[i].request,
         { Authorization: `Bearer ${accessToken}` },
-        {
-          displayName: names[i],
-          birthDate: "1996-06-15",
-          gender: i === 0 ? "woman" : "man",
-          bio: "本機瀏覽器測試用搜尋列，用名稱或 email 找到人再按喜歡。",
-          // 丁在高雄，超過預設的 100 公里，雙方偏好不符。
-          ...(i === 3
-            ? { city: "高雄市", latitude: 22.6273, longitude: 120.3014 }
-            : {}),
-        },
+        profile(i),
       );
       people.push({ id: user.id, email, accessToken });
     }
+    const headers = (i: number) => ({
+      Authorization: `Bearer ${people[i].accessToken}`,
+    });
+    const get = async (path: string, i = 0) =>
+      (
+        await contexts[i].request.get(`/api/v1${path}`, { headers: headers(i) })
+      ).json();
+    const likedIds = async () =>
+      (await get("/likes")).map(
+        (l: { targetUserId: string }) => l.targetUserId,
+      );
+    const matchedIds = async () =>
+      (await get("/matches")).map(
+        (m: { otherUser: { userId: string } }) => m.otherUser.userId,
+      );
     const a = await contexts[0].newPage();
     const box = a.getByRole("searchbox", { name: "搜尋名稱或 email" });
     const search = a.getByRole("region", { name: "搜尋使用者（測試用）" });
     const cards = search.locator(".person-card");
+    const notes = cards.locator(".user-search-status li");
+    const matchNotice = a.locator(".discover-main .success");
+    const press = (name: "喜歡" | "略過") =>
+      cards.getByRole("button", { name, exact: true }).click();
     async function find(text: string) {
       await box.fill(text);
       await box.press("Enter");
@@ -688,89 +701,89 @@ test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜�
     await a.goto("/discover?muggle=false");
     await expect(box).toBeVisible();
     await expect(a.locator(".discover-main .person-card")).toHaveCount(0);
-    // 搜尋共同的亂數：乙、丙、丁都找得到，自己（甲）不會出現。
+    // 搜尋共同的亂數：只找到乙，自己（甲）不會出現。
     await find(tag);
-    await expect(cards).toHaveCount(3);
-    await expect(search).not.toContainText(names[0]);
-    const notes = cards.locator(".user-search-status li");
-    const get = async (path: string, i = 0) =>
-      (
-        await contexts[i].request.get(`/api/v1${path}`, {
-          headers: { Authorization: `Bearer ${people[i].accessToken}` },
-        })
-      ).json();
-    const likedIds = async () =>
-      (await get("/likes")).map(
-        (l: { targetUserId: string }) => l.targetUserId,
-      );
-    const matchedIds = async () =>
-      (await get("/matches")).map(
-        (m: { otherUser: { userId: string } }) => m.otherUser.userId,
-      );
-    // 偏好不符的丁：照樣可以按喜歡，一般的 /interactions 仍然會擋。
-    const far = cards.filter({ hasText: names[3] });
-    await expect(far.locator(".user-search-status")).toContainText(
-      "不符合雙方偏好",
-    );
-    await far.getByRole("button", { name: "喜歡", exact: true }).click();
-    await expect(far.locator(".user-search-status")).toContainText(
-      "你已經按過喜歡",
-    );
-    const normal = await contexts[0].request.post("/api/v1/interactions", {
-      headers: { Authorization: `Bearer ${people[0].accessToken}` },
-      data: { targetUserId: people[3].id, action: "like" },
-    });
-    expect(normal.status()).toBe(409);
-    // 用 email 的一部分（大寫）找乙：喜歡、改成略過，狀態跟著變。
+    await expect(cards).toHaveCount(1);
+    await expect(cards).toContainText(names[1]);
+    // 改用 email 的一部分（大寫）找乙：喜歡、改成略過，狀態跟著變。
     await find(people[1].email.split("@")[0].toUpperCase());
     await expect(cards).toHaveCount(1);
     await expect(notes).toHaveCount(0);
-    await cards.getByRole("button", { name: "喜歡", exact: true }).click();
+    await press("喜歡");
     await expect(notes).toHaveText(["你已經按過喜歡，可以改成略過。"]);
-    await cards.getByRole("button", { name: "略過", exact: true }).click();
+    await press("略過");
     await expect(notes).toHaveText(["你已經略過，可以改成喜歡。"]);
     expect(await likedIds()).not.toContain(people[1].id);
     // 乙先喜歡甲；甲把略過改成喜歡，就配對成功。
     const back = await contexts[1].request.post("/api/v1/interactions", {
-      headers: { Authorization: `Bearer ${people[1].accessToken}` },
+      headers: headers(1),
       data: { targetUserId: people[0].id, action: "like" },
     });
     expect(back.status()).toBe(201);
-    const matchNotice = a.locator(".discover-main .success");
-    await cards.getByRole("button", { name: "喜歡", exact: true }).click();
+    await press("喜歡");
     await expect(matchNotice).toContainText("你們互相喜歡");
     await expect(notes).toHaveText(["你們已經配對，按略過會解除配對。"]);
     expect(await matchedIds()).toContain(people[1].id);
     // 已配對按略過：解除配對。
-    await cards.getByRole("button", { name: "略過", exact: true }).click();
+    await press("略過");
     await expect(notes).toHaveText([
       "配對已結束，互相喜歡就會恢復配對。",
       "你已經略過，可以改成喜歡。",
     ]);
     await expect(matchNotice).toBeHidden();
     expect(await matchedIds()).not.toContain(people[1].id);
-    // 配對已結束再按喜歡：恢復配對。
-    await cards.getByRole("button", { name: "喜歡", exact: true }).click();
+    // 乙搬到高雄（超過預設的 100 公里）：偏好不符，一般的 /interactions 會擋，搜尋列照樣可以按。
+    const moved = await contexts[1].request.put("/api/v1/profile", {
+      headers: headers(1),
+      data: {
+        city: "高雄市",
+        latitude: 22.6273,
+        longitude: 120.3014,
+        heightCm: 170,
+        traits: [
+          "humorous",
+          "likes_hotpot",
+          "values_communication",
+          "nine_to_five",
+          "coffee",
+          "movies",
+          "reading",
+        ],
+        datingGoals: ["serious_relationship"],
+        ...profile(1),
+      },
+    });
+    expect(moved.status()).toBe(200);
+    const normal = await contexts[0].request.post("/api/v1/interactions", {
+      headers: headers(0),
+      data: { targetUserId: people[1].id, action: "like" },
+    });
+    expect(normal.status()).toBe(409);
+    await find(names[1]);
+    await expect(notes).toContainText(["不符合雙方偏好，在這裡照樣可以按。"]);
+    // 配對已結束再按喜歡：恢復配對（偏好不符也一樣）。
+    await press("喜歡");
     await expect(matchNotice).toContainText("你們互相喜歡");
-    await expect(notes).toHaveText(["你們已經配對，按略過會解除配對。"]);
+    await expect(notes).toContainText(["你們已經配對，按略過會解除配對。"]);
     expect(await matchedIds()).toContain(people[1].id);
-    // 丙封鎖甲：搜尋到時標示封鎖中，按略過會解除雙方的封鎖。
-    const blocked = await contexts[2].request.post("/api/v1/blocks", {
-      headers: { Authorization: `Bearer ${people[2].accessToken}` },
+    // 乙封鎖甲：搜尋到時標示封鎖中，按略過會解除雙方的封鎖。
+    const blocked = await contexts[1].request.post("/api/v1/blocks", {
+      headers: headers(1),
       data: { blockedUserId: people[0].id },
     });
     expect(blocked.ok()).toBe(true);
-    expect(await get("/blocks", 2)).toHaveLength(1);
-    await find(names[2]);
-    await expect(notes).toHaveText(["封鎖中，按喜歡或略過會解除雙方的封鎖。"]);
-    await cards.getByRole("button", { name: "略過", exact: true }).click();
-    await expect(notes).toHaveText(["你已經略過，可以改成喜歡。"]);
-    expect(await get("/blocks", 2)).toHaveLength(0);
-    expect(await likedIds()).toContain(people[1].id);
-    expect(await likedIds()).not.toContain(people[2].id);
+    expect(await get("/blocks", 1)).toHaveLength(1);
+    await find(tag);
+    await expect(notes).toContainText([
+      "封鎖中，按喜歡或略過會解除雙方的封鎖。",
+    ]);
+    await press("略過");
+    await expect(notes).not.toContainText(["封鎖中"]);
+    await expect(notes).toContainText(["你已經略過，可以改成喜歡。"]);
+    expect(await get("/blocks", 1)).toHaveLength(0);
     // 空字串不能搜尋。
     const empty = await contexts[0].request.get("/api/v1/discovery/search?q=", {
-      headers: { Authorization: `Bearer ${people[0].accessToken}` },
+      headers: headers(0),
     });
     expect(empty.status()).toBe(400);
   } finally {
