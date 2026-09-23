@@ -8,12 +8,19 @@ const tunnel = process.env.NGINX_CLIENT_IP === "cloudflare-tunnel";
 const viaNginx =
   (await fetch(`${base}/health`)).headers.get("server") === "nginx";
 const skip = viaNginx ? false : "TEST_API_URL 沒有經過 nginx";
-const redis = new Redis(process.env.REDIS_URL, { lazyConnect: true });
+const redis = new Redis(process.env.REDIS_URL, {
+  lazyConnect: true,
+  maxRetriesPerRequest: 1,
+});
+redis.on("error", () => {});
 const used = [];
 after(async () => {
   const keys = used.flatMap((b) => [`rate:auth:${b}`, `rate:refresh:${b}`]);
-  if (keys.length) await redis.del(...keys);
-  redis.disconnect();
+  try {
+    if (keys.length) await redis.del(...keys);
+  } finally {
+    redis.disconnect();
+  }
 });
 function fakeIp() {
   const ip = `198.${18 + randomInt(2)}.${randomInt(256)}.${randomInt(1, 255)}`;
@@ -46,17 +53,37 @@ async function refresh(headers) {
   const res = await fetch(`${base}/auth/refresh`, { method: "POST", headers });
   return res.status;
 }
+// 「key 不存在」的斷言要搭配正向對照：確認 API 寫的就是 REDIS_URL 這台，否則連錯 Redis 也會通過。
+async function refreshCounters() {
+  const mine = new Set(used.map((b) => `rate:refresh:${b}`));
+  const snapshot = new Map();
+  for (const key of await redis.keys("rate:refresh:*"))
+    if (!mine.has(key))
+      snapshot.set(key, {
+        count: Number(await redis.get(key)),
+        ttl: await redis.ttl(key),
+      });
+  return snapshot;
+}
+// TTL 變長代表 key 過期後被重建，也算寫入。
+const wrote = (before, current) =>
+  [...current].some(([key, now]) => {
+    const was = before.get(key);
+    return !was || now.count > was.count || now.ttl > was.ttl;
+  });
 test(
   "direct：偽造 CF-Connecting-IP、X-Forwarded-For、X-Real-IP 都換不到新的限流額度",
   { skip: skip || (tunnel && "NGINX_CLIENT_IP=cloudflare-tunnel") },
   async () => {
     const [cf, forwarded, real] = [fakeIp(), fakeIp(), fakeIp()];
+    const before = await refreshCounters();
     const status = await refresh({
       "CF-Connecting-IP": cf,
       "X-Forwarded-For": forwarded,
       "X-Real-IP": real,
     });
     assert.ok([401, 429].includes(status), `status ${status}`);
+    assert.ok(wrote(before, await refreshCounters()), "API 沒有寫進這台 Redis");
     for (const ip of [cf, forwarded, real])
       assert.equal(await redis.exists(`rate:refresh:${ip}`), 0, ip);
   },
@@ -98,11 +125,13 @@ test(
   { skip: skip || (!tunnel && "NGINX_CLIENT_IP 不是 cloudflare-tunnel") },
   async () => {
     const spoofed = fakeIp();
+    const before = await refreshCounters();
     const status = await refresh({
       "CF-Connecting-IP": "not-an-ip",
       "X-Forwarded-For": spoofed,
     });
     assert.ok([401, 429].includes(status), `status ${status}`);
+    assert.ok(wrote(before, await refreshCounters()), "API 沒有寫進這台 Redis");
     assert.equal(await redis.exists("rate:refresh:not-an-ip"), 0);
     assert.equal(await redis.exists(`rate:refresh:${spoofed}`), 0);
   },
