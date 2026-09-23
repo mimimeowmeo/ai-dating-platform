@@ -1993,7 +1993,6 @@ function VerificationPage() {
   );
 }
 const matchTags = [
-  { key: "all", label: "全部" },
   { key: "matched", label: "已配對" },
   { key: "liked", label: "我喜歡的" },
 ] as const;
@@ -2003,7 +2002,7 @@ function MatchesPage() {
   const likes = useData<SentLike[]>("/likes");
   const client = useQueryClient();
   const [error, setError] = useState("");
-  const [tag, setTag] = useState<MatchTag>("all");
+  const [tag, setTag] = useState<MatchTag>("matched");
   const [person, setPerson] = useState<Card | null>(null);
   const matches = q.data ?? [];
   // 已配對以 /matches 為準；兩個查詢刷新有先後，這裡再排除一次，同一個人才不會出現兩張卡。
@@ -2012,10 +2011,10 @@ function MatchesPage() {
     (l) => l.status === "waiting" && !matchedIds.has(l.targetUserId),
   );
   const counts: Record<MatchTag, number> = {
-    all: matches.length + liked.length,
     matched: matches.length,
     liked: liked.length,
   };
+  const total = counts.matched + counts.liked;
   return (
     <>
       <Heading
@@ -2023,7 +2022,7 @@ function MatchesPage() {
         title="我的配對"
         text="相互喜歡，是故事的第一頁。"
       >
-        {!!counts.all && (
+        {!!total && (
           <div className="section-bar">
             <div className="tags selectable" role="group" aria-label="篩選">
               {matchTags.map((t) => (
@@ -2046,7 +2045,7 @@ function MatchesPage() {
       <ErrorText message={error || q.error?.message || likes.error?.message} />
       {q.isLoading || likes.isLoading ? (
         <Loading />
-      ) : !counts.all ? (
+      ) : !total ? (
         <Empty
           title="你的下一個火花，還在路上"
           text="到探索看看，彼此喜歡後會在這裡相遇。"
@@ -2069,7 +2068,7 @@ function MatchesPage() {
         )
       ) : (
         <div className="match-grid">
-          {tag !== "liked" &&
+          {tag === "matched" &&
             matches.map((m) => {
               const fresh = matchedLabel(m.createdAt);
               return (
@@ -2142,7 +2141,7 @@ function MatchesPage() {
                 </article>
               );
             })}
-          {tag !== "matched" &&
+          {tag === "liked" &&
             liked.map((l) => (
               <article className="match-card" key={l.targetUserId}>
                 <Portrait person={l.user} large />
