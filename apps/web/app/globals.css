@@ -1498,6 +1498,12 @@ input[type="range"] {
   flex-shrink: 0;
   display: inline-flex;
 }
+/* 列表頭像比預設的 40px 大一些，維持換成照片前的份量。 */
+.conversation-avatar .portrait {
+  width: 52px;
+  height: 52px;
+  font-size: 18px;
+}
 /* 綠燈疊在頭像右下角，外圈用底色描一圈才不會跟頭像糊在一起。 */
 .online-dot {
   position: absolute;

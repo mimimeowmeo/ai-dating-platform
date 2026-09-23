@@ -150,7 +150,7 @@ function Portrait({
       {person.photos?.[0] ? (
         <img src={person.photos[0].url} alt={`${person.displayName}的照片`} />
       ) : (
-        <span>{person.displayName.slice(0, 1)}</span>
+        <span>{initialOf(person.displayName)}</span>
       )}
     </div>
   );
@@ -2081,7 +2081,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                 <p>{unread} 則未讀訊息</p>
               </div>
               <div className="conversation-items">
-                {q.data.map((c, i) => (
+                {q.data.map((c) => (
                   <Link
                     href={`/messages/${c.id}`}
                     className={
@@ -2090,7 +2090,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                     key={c.id}
                   >
                     <span className="conversation-avatar">
-                      <Avatar name={c.otherUser.displayName} tone={i} />
+                      <Portrait person={c.otherUser} />
                       {/* 綠燈只在對方上線時出現。 */}
                       {onlineIds.includes(c.otherUser.userId) && (
                         <span className="online-dot" aria-label="上線中" />
