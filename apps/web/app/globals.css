@@ -1205,6 +1205,34 @@ input[type="range"] {
   min-width: 0;
   container-type: inline-size;
 }
+/* 測試用搜尋列（網址帶 ?muggle=false 才出現）。 */
+.user-search {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px dashed var(--dashed);
+}
+.user-search form {
+  display: flex;
+  gap: 8px;
+}
+.user-search-status {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--tag-alt-bg);
+  border-radius: 12px;
+  background: var(--tag-alt-bg);
+  color: var(--tag-alt-ink);
+  font-size: 13px;
+}
+.user-search-status li + li {
+  margin-top: 4px;
+}
+.user-search-note {
+  color: var(--muted);
+  font-size: 13px;
+}
 .soft-note {
   display: flex;
   align-items: center;

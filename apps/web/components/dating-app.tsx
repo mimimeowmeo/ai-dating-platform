@@ -1,8 +1,9 @@
 "use client";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Fragment,
+  Suspense,
   useEffect,
   useRef,
   useState,
@@ -29,6 +30,7 @@ import {
   MessageCircle,
   Moon,
   RefreshCw,
+  Search,
   Send,
   Settings2,
   ShieldCheck,
@@ -46,6 +48,7 @@ import {
   genderLabels,
   genderText,
   type Card,
+  type SearchCard,
   type Profile,
   type Preferences,
   type Match,
@@ -1030,19 +1033,25 @@ function Discover() {
   const [error, setError] = useState("");
   const [match, setMatch] = useState(false);
   const person = query.data?.[0];
-  async function act(action: "like" | "pass") {
-    if (!person) return;
+  // 搜尋列（測試用）改走 /discovery/search/interactions，規則較寬鬆。
+  async function act(
+    target: Card,
+    action: "like" | "pass",
+    path = "/interactions",
+  ) {
     setBusy(true);
     setError("");
     try {
-      const result = await send<{ matched: boolean }>("/interactions", {
-        targetUserId: person.userId,
+      const result = await send<{ matched: boolean }>(path, {
+        targetUserId: target.userId,
         action,
       });
       setMatch(result.matched);
       await client.invalidateQueries({ queryKey: ["/discovery"] });
+      await client.invalidateQueries({ queryKey: ["/discovery/search"] });
       await client.invalidateQueries({ queryKey: ["/matches"] });
       await client.invalidateQueries({ queryKey: ["/likes"] });
+      await client.invalidateQueries({ queryKey: ["/conversations"] });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1073,44 +1082,44 @@ function Discover() {
               </button>
             </div>
           )}
-          {query.isLoading ? (
-            <Loading />
-          ) : !profile.data ? (
-            <Empty
-              title="先讓大家認識你"
-              text="完成個人資料與城市，開始探索彼此適合的人。"
-              link="/profile"
-              label="完成個人檔案"
-            />
-          ) : !person ? (
-            <Empty
-              title="把美好的相遇，留給下一次"
-              text="目前沒有符合雙方偏好的人。試著調整探索範圍，或邀請朋友建立帳號。"
-              link="/preferences"
-              label="調整探索範圍"
-            />
-          ) : (
-            <PersonCard person={person}>
-              <div className="discovery-actions">
-                <button
-                  className="action-button pass"
-                  disabled={busy}
-                  onClick={() => act("pass")}
-                >
-                  <X size={26} strokeWidth={1.5} />
-                  略過
-                </button>
-                <button
-                  className="action-button like"
-                  disabled={busy}
-                  onClick={() => act("like")}
-                >
-                  <HeartIcon filled size={26} />
-                  喜歡
-                </button>
-              </div>
-            </PersonCard>
-          )}
+          {/* useSearchParams 依官方建議包在 Suspense 裡。 */}
+          <Suspense fallback={<Loading />}>
+            <MuggleSwitch
+              search={
+                <UserSearch
+                  busy={busy}
+                  onAct={(p, action) =>
+                    act(p, action, "/discovery/search/interactions")
+                  }
+                />
+              }
+            >
+              {query.isLoading ? (
+                <Loading />
+              ) : !profile.data ? (
+                <Empty
+                  title="先讓大家認識你"
+                  text="完成個人資料與城市，開始探索彼此適合的人。"
+                  link="/profile"
+                  label="完成個人檔案"
+                />
+              ) : !person ? (
+                <Empty
+                  title="把美好的相遇，留給下一次"
+                  text="目前沒有符合雙方偏好的人。試著調整探索範圍，或邀請朋友建立帳號。"
+                  link="/preferences"
+                  label="調整探索範圍"
+                />
+              ) : (
+                <PersonCard person={person}>
+                  <DiscoveryActions
+                    busy={busy}
+                    onAct={(action) => act(person, action)}
+                  />
+                </PersonCard>
+              )}
+            </MuggleSwitch>
+          </Suspense>
           <p className="soft-note">
             <HeartIcon size={15} />
             慢慢認識，不急著心動。
@@ -1119,6 +1128,117 @@ function Discover() {
         <DiscoverAside />
       </div>
     </>
+  );
+}
+function DiscoveryActions({
+  busy,
+  onAct,
+}: {
+  busy: boolean;
+  onAct: (action: "like" | "pass") => void;
+}) {
+  return (
+    <div className="discovery-actions">
+      <button
+        className="action-button pass"
+        disabled={busy}
+        onClick={() => onAct("pass")}
+      >
+        <X size={26} strokeWidth={1.5} />
+        略過
+      </button>
+      <button
+        className="action-button like"
+        disabled={busy}
+        onClick={() => onAct("like")}
+      >
+        <HeartIcon filled size={26} />
+        喜歡
+      </button>
+    </div>
+  );
+}
+// 網址帶 ?muggle=false 時改顯示測試用搜尋列，原本的探索卡片先隱藏。
+function MuggleSwitch({
+  search,
+  children,
+}: {
+  search: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return useSearchParams().get("muggle") === "false" ? search : children;
+}
+// 搜尋結果的狀態說明；一張卡片可能同時有好幾項（例如封鎖中又按過喜歡）。
+function searchNotes(s: SearchCard["searchState"]) {
+  const notes: string[] = [];
+  if (s.blocked) notes.push("封鎖中，按喜歡或略過會解除雙方的封鎖。");
+  if (s.match === "active") notes.push("你們已經配對，按略過會解除配對。");
+  else {
+    if (s.match === "ended") notes.push("配對已結束，互相喜歡就會恢復配對。");
+    if (s.action === "like") notes.push("你已經按過喜歡，可以改成略過。");
+    if (s.action === "pass") notes.push("你已經略過，可以改成喜歡。");
+  }
+  if (!s.eligible) notes.push("不符合雙方偏好，在這裡照樣可以按。");
+  return notes;
+}
+// 測試用搜尋列：用顯示名稱或 email 搜尋除了自己以外的全部使用者，按過的人也能重新按。
+function UserSearch({
+  busy,
+  onAct,
+}: {
+  busy: boolean;
+  onAct: (person: Card, action: "like" | "pass") => void;
+}) {
+  const user = useAuth((s) => s.user);
+  const [text, setText] = useState("");
+  const [keyword, setKeyword] = useState("");
+  const results = useQuery<SearchCard[]>({
+    queryKey: ["/discovery/search", keyword, user?.id],
+    queryFn: () =>
+      api<SearchCard[]>(`/discovery/search?q=${encodeURIComponent(keyword)}`),
+    enabled: !!user && !!keyword,
+  });
+  return (
+    <section className="user-search" aria-label="搜尋使用者（測試用）">
+      <form
+        role="search"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setKeyword(text.trim());
+        }}
+      >
+        <input
+          type="search"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="搜尋名稱或 email"
+          aria-label="搜尋名稱或 email"
+          maxLength={100}
+        />
+        <button className="button" type="submit">
+          <Search size={16} />
+          搜尋
+        </button>
+      </form>
+      <ErrorText message={results.error?.message} />
+      {results.isFetching ? (
+        <p className="user-search-note">搜尋中…</p>
+      ) : results.data && !results.data.length ? (
+        <p className="user-search-note">找不到「{keyword}」。</p>
+      ) : null}
+      {results.data?.map((p) => (
+        <PersonCard key={p.userId} person={p}>
+          {searchNotes(p.searchState).length > 0 && (
+            <ul className="user-search-status">
+              {searchNotes(p.searchState).map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          )}
+          <DiscoveryActions busy={busy} onAct={(action) => onAct(p, action)} />
+        </PersonCard>
+      ))}
+    </section>
   );
 }
 function DiscoverAside() {

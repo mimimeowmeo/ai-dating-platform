@@ -24,6 +24,15 @@ export type Card = {
   traits: string[];
   datingGoals: string[];
 };
+// GET /discovery/search 的結果：多一份目前的狀態（我按過什麼、配對、偏好、封鎖）。
+export type SearchCard = Card & {
+  searchState: {
+    action: "like" | "pass" | null;
+    match: "active" | "ended" | null;
+    eligible: boolean;
+    blocked: boolean;
+  };
+};
 export type Profile = {
   userId: string;
   displayName: string;
