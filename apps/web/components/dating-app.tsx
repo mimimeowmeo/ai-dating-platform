@@ -249,6 +249,109 @@ const rangeStyle = (
     "--low": (low - min) / (max - min),
     "--high": (high - min) / (max - min),
   }) as CSSProperties;
+// 一條軌道兩個把手。兩個原生 range 疊在一起時只有 22px 的把手接得到滑鼠，
+// 軌道本身是死的，兩顆重疊時下面那顆也點不到。改由外框接管指標事件：
+// 按在哪裡就把離得最近的那顆移過去，按住繼續拖也是同一顆，跟單顆拉桿一樣。
+// 原生 input 留給鍵盤與螢幕閱讀器（Tab 進去用方向鍵微調），也維持 e2e 用 fill() 操作。
+function RangePair({
+  range,
+  low,
+  high,
+  labels,
+  onChange,
+}: {
+  range: number[];
+  low: number;
+  high: number;
+  labels: [string, string];
+  // 只回報「哪一顆、要到哪」，夾住另一顆交給上層用最新狀態處理，拖太快也不會反過來。
+  onChange: (which: "low" | "high", value: number) => void;
+}) {
+  const [min, max] = range;
+  const box = useRef<HTMLDivElement>(null);
+  const lowInput = useRef<HTMLInputElement>(null);
+  const highInput = useRef<HTMLInputElement>(null);
+  // 正在拖的是哪一顆；兩顆重疊又剛好按在上面時先不決定，看第一下往哪邊拖。
+  const active = useRef<"low" | "high" | "either" | null>(null);
+  const valueAt = (clientX: number) => {
+    const el = box.current;
+    if (!el) return low;
+    const rect = el.getBoundingClientRect();
+    const thumb =
+      parseFloat(getComputedStyle(el).getPropertyValue("--thumb")) || 22;
+    // 把手中心的行程是扣掉把手寬度後的那一段（與 CSS 的軌道畫法一致）。
+    const ratio =
+      (clientX - rect.left - thumb / 2) / Math.max(1, rect.width - thumb);
+    return Math.round(min + Math.min(1, Math.max(0, ratio)) * (max - min));
+  };
+  const move = (which: "low" | "high", value: number) => {
+    onChange(which, value);
+    (which === "low" ? lowInput : highInput).current?.focus({
+      preventScroll: true,
+    });
+  };
+  const stop = (e: React.PointerEvent<HTMLDivElement>) => {
+    active.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  return (
+    <div
+      ref={box}
+      className="range-pair"
+      style={rangeStyle(range, low, high)}
+      // 外框在 <label> 裡；擋掉 label 的預設行為，點軌道時焦點才不會被搶去第一個 input。
+      onClick={(e) => e.preventDefault()}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const value = valueAt(e.clientX);
+        active.current =
+          value < low
+            ? "low"
+            : value > high
+              ? "high"
+              : low === high
+                ? "either"
+                : value - low <= high - value
+                  ? "low"
+                  : "high";
+        e.currentTarget.setPointerCapture(e.pointerId);
+        if (active.current !== "either") move(active.current, value);
+      }}
+      onPointerMove={(e) => {
+        if (!active.current) return;
+        const value = valueAt(e.clientX);
+        if (active.current === "either") {
+          if (value === low) return;
+          active.current = value > low ? "high" : "low";
+        }
+        move(active.current, value);
+      }}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+    >
+      <input
+        ref={lowInput}
+        type="range"
+        aria-label={labels[0]}
+        min={min}
+        max={max}
+        value={low}
+        onChange={(e) => onChange("low", Number(e.target.value))}
+      />
+      <input
+        ref={highInput}
+        type="range"
+        aria-label={labels[1]}
+        min={min}
+        max={max}
+        value={high}
+        onChange={(e) => onChange("high", Number(e.target.value))}
+      />
+    </div>
+  );
+}
 const goalText = (codes?: string[]) =>
   codes?.length ? codes.map(traitLabel).join("、") : "";
 // 新帳號要先補齊這幾項才能進站；照片必須先存好基本資料才能上傳。
@@ -1573,11 +1676,27 @@ function PreferencesPage() {
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 兩支拉桿代表同一個範圍，拖過頭時另一支跟著移動，範圍才不會反過來。
-  const setAges = (minAge: number, maxAge: number) =>
-    setValues((v) => ({ ...v, minAge, maxAge }));
-  const setHeights = (minHeightCm: number, maxHeightCm: number) =>
-    setValues((v) => ({ ...v, minHeightCm, maxHeightCm }));
+  // 兩支拉桿代表同一個範圍：動其中一支時用最新狀態把另一支夾住，拖過頭也不會反過來。
+  const setAges = (which: "low" | "high", value: number) =>
+    setValues((v) =>
+      which === "low"
+        ? { ...v, minAge: value, maxAge: Math.max(v.maxAge, value) }
+        : { ...v, minAge: Math.min(v.minAge, value), maxAge: value },
+    );
+  const setHeights = (which: "low" | "high", value: number) =>
+    setValues((v) =>
+      which === "low"
+        ? {
+            ...v,
+            minHeightCm: value,
+            maxHeightCm: Math.max(v.maxHeightCm, value),
+          }
+        : {
+            ...v,
+            minHeightCm: Math.min(v.minHeightCm, value),
+            maxHeightCm: value,
+          },
+    );
   useEffect(() => {
     if (query.data) {
       const {
@@ -1637,67 +1756,23 @@ function PreferencesPage() {
           <div className="form-grid">
             <label className="span-two">
               年齡範圍：{values.minAge}–{values.maxAge} 歲
-              <div
-                className="range-pair"
-                style={rangeStyle(ageRange, values.minAge, values.maxAge)}
-              >
-                <input
-                  type="range"
-                  aria-label="最小年齡"
-                  min={ageRange[0]}
-                  max={ageRange[1]}
-                  value={values.minAge}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setAges(next, Math.max(values.maxAge, next));
-                  }}
-                />
-                <input
-                  type="range"
-                  aria-label="最大年齡"
-                  min={ageRange[0]}
-                  max={ageRange[1]}
-                  value={values.maxAge}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setAges(Math.min(values.minAge, next), next);
-                  }}
-                />
-              </div>
+              <RangePair
+                range={ageRange}
+                low={values.minAge}
+                high={values.maxAge}
+                labels={["最小年齡", "最大年齡"]}
+                onChange={setAges}
+              />
             </label>
             <label className="span-two">
               身高範圍：{values.minHeightCm}–{values.maxHeightCm} 公分
-              <div
-                className="range-pair"
-                style={rangeStyle(
-                  heightRange,
-                  values.minHeightCm,
-                  values.maxHeightCm,
-                )}
-              >
-                <input
-                  type="range"
-                  aria-label="最低身高"
-                  min={heightRange[0]}
-                  max={heightRange[1]}
-                  value={values.minHeightCm}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setHeights(next, Math.max(values.maxHeightCm, next));
-                  }}
-                />
-                <input
-                  type="range"
-                  aria-label="最高身高"
-                  min={heightRange[0]}
-                  max={heightRange[1]}
-                  value={values.maxHeightCm}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setHeights(Math.min(values.minHeightCm, next), next);
-                  }}
-                />
-              </div>
+              <RangePair
+                range={heightRange}
+                low={values.minHeightCm}
+                high={values.maxHeightCm}
+                labels={["最低身高", "最高身高"]}
+                onChange={setHeights}
+              />
               <small>沒有填身高的人仍會出現。</small>
             </label>
             <label>

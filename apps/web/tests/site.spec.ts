@@ -383,3 +383,73 @@ test("多分頁同時開啟不會登出、仍即時收訊；手機開啟不存�
     await Promise.all(contexts.map((c) => c.close()));
   }
 });
+test("探索偏好：點軌道會把最近的那顆把手移過去，按住可以直接拖", async ({
+  browser,
+}) => {
+  const base = process.env.E2E_BASE_URL || "http://localhost:8080";
+  const context = await browser.newContext({ baseURL: base });
+  try {
+    const auth = await context.request.post("/api/v1/auth/register", {
+      data: { email: newEmail(), password: `Safe-${randomUUID()}` },
+    });
+    expect(auth.status()).toBe(201);
+    const user = await auth.json();
+    await seedProfile(
+      context.request,
+      { Authorization: `Bearer ${user.accessToken}` },
+      {
+        displayName: "拉桿測試",
+        birthDate: "1996-06-15",
+        gender: "woman",
+        bio: "本機瀏覽器拉桿測試",
+      },
+    );
+    const page = await context.newPage();
+    await page.goto("/preferences");
+    const minAge = page.getByLabel("最小年齡");
+    const maxAge = page.getByLabel("最大年齡");
+    await expect(minAge).toHaveValue("18");
+    await expect(maxAge).toHaveValue("99");
+    const track = page.locator(".range-pair").first();
+    const box = (await track.boundingBox())!;
+    const thumb = 22;
+    // 把手中心的行程是扣掉把手寬度後的那一段，跟元件的換算一致。
+    const xAt = (ratio: number) =>
+      box.x + thumb / 2 + ratio * (box.width - thumb);
+    const valueAt = (ratio: number) => Math.round(18 + ratio * (130 - 18));
+    const near = (value: number) =>
+      new RegExp(`^(${value - 1}|${value}|${value + 1})$`);
+    // 按在軌道 70% 的位置（約 96 歲）：離最大年齡（99）近，最小年齡不動。
+    await page.mouse.click(xAt(0.7), box.y + box.height / 2);
+    await expect(maxAge).toHaveValue(near(valueAt(0.7)));
+    await expect(minAge).toHaveValue("18");
+    // 按在 15%（約 35 歲）：離最小年齡（18）近，換它過去。
+    await page.mouse.click(xAt(0.15), box.y + box.height / 2);
+    await expect(minAge).toHaveValue(near(valueAt(0.15)));
+    await expect(maxAge).toHaveValue(near(valueAt(0.7)));
+    // 從最小把手附近按住往右拖過最大把手：最小跟著走，最大被推著走，範圍不會反過來。
+    await page.mouse.move(xAt(0.15), box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(xAt(0.5), box.y + box.height / 2, { steps: 6 });
+    await page.mouse.move(xAt(0.9), box.y + box.height / 2, { steps: 6 });
+    await page.mouse.up();
+    await expect(minAge).toHaveValue(near(valueAt(0.9)));
+    await expect(maxAge).toHaveValue(near(valueAt(0.9)));
+    // 鍵盤仍然可用：剛拖過的把手已取得焦點，方向鍵能微調。
+    await page.keyboard.press("ArrowLeft");
+    await expect(minAge).toHaveValue(near(valueAt(0.9) - 1));
+    // 身高那條也是同一個元件：點 50% 的位置，離較近的最高身高過去。
+    const minHeight = page.getByLabel("最低身高");
+    const maxHeight = page.getByLabel("最高身高");
+    const heights = page.locator(".range-pair").nth(1);
+    const hb = (await heights.boundingBox())!;
+    await page.mouse.click(
+      hb.x + thumb / 2 + 0.6 * (hb.width - thumb),
+      hb.y + hb.height / 2,
+    );
+    await expect(maxHeight).toHaveValue(near(Math.round(130 + 0.6 * 120)));
+    await expect(minHeight).toHaveValue("130");
+  } finally {
+    await context.close();
+  }
+});
