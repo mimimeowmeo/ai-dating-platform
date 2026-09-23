@@ -5,6 +5,7 @@
 > 這份文件是此功能的單一規格來源；AI 內部 API 的欄位細節以
 > [`services/ai/app/reply/schemas.py`](../../services/ai/app/reply/schemas.py) 為準。
 > 資料庫存取邊界見 [ADR 0002](../architecture/adr/0002-db-ownership.md)。
+> 給使用者看的白話說明見 [AI 聊天輔助使用者指南](AI-ASSIST-USER-GUIDE.md)。
 
 ## 0. 開發順序與目前範圍
 
