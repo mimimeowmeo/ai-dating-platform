@@ -539,12 +539,17 @@ input[type="range"] {
   box-shadow: 0 1px 4px var(--shadow-thumb);
   cursor: pointer;
 }
-/* 一條軌道兩個把手：兩個 range 疊在同一條軌道上，只有把手接得到滑鼠。 */
+/* 一條軌道兩個把手：兩個 range 疊在同一條軌道上。指標事件由外框接管
+   （見 RangePair）：整條軌道都能按，最近的那顆把手會移過去；原生 input 只留給鍵盤。 */
 .range-pair {
   --thumb: 22px;
   position: relative;
   height: 34px;
   margin: 12px 0 4px;
+  cursor: pointer;
+  /* 左右拖曳交給外框，上下仍可捲動頁面。 */
+  touch-action: pan-y;
+  user-select: none;
 }
 .range-pair::before,
 .range-pair::after {
@@ -588,7 +593,7 @@ input[type="range"] {
   background: var(--primary);
   box-shadow: 0 1px 4px var(--shadow-thumb);
   cursor: pointer;
-  pointer-events: auto;
+  pointer-events: none;
 }
 .range-pair input[type="range"]::-moz-range-thumb {
   width: 22px;
@@ -598,7 +603,7 @@ input[type="range"] {
   background: var(--primary);
   box-shadow: 0 1px 4px var(--shadow-thumb);
   cursor: pointer;
-  pointer-events: auto;
+  pointer-events: none;
 }
 .range-pair input[type="range"]:focus-visible::-webkit-slider-thumb {
   outline: 2px solid var(--accent);
@@ -1179,6 +1184,7 @@ input[type="range"] {
 }
 .section-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
@@ -1413,6 +1419,12 @@ input[type="range"] {
   color: var(--on-primary);
   font-size: 12px;
 }
+/* 淡底框線版，跟實心的「已配對」分開。文字用 --ink：--muted 疊在 --page-soft 上只有 3.72:1。 */
+.badge.soft {
+  border: 1px solid var(--line);
+  background: var(--page-soft);
+  color: var(--ink);
+}
 .match-copy h2 {
   font-size: 24px;
   overflow-wrap: anywhere;
@@ -1497,6 +1509,12 @@ input[type="range"] {
   position: relative;
   flex-shrink: 0;
   display: inline-flex;
+}
+/* 列表頭像比預設的 40px 大一些，維持換成照片前的份量。 */
+.conversation-avatar .portrait {
+  width: 52px;
+  height: 52px;
+  font-size: 18px;
 }
 /* 綠燈疊在頭像右下角，外圈用底色描一圈才不會跟頭像糊在一起。 */
 .online-dot {

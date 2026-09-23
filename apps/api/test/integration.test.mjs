@@ -742,6 +742,130 @@ test(
 // 原本這裡有一個「Node BullMQ producer → Python worker 真實互通」測試。
 // ai-worker 服務已移除（見 docker-compose.yml 的說明），佇列沒有消費者，
 // 這個測試必然逾時，因此一併移除。真人驗證改由 verifySelfie 的降級路徑覆蓋。
+test(
+  "我按過的喜歡：等待回應、配對後、略過、雙向封鎖與解除配對",
+  { timeout: 30000 },
+  async () => {
+    try {
+      const a = await create("喜歡甲"),
+        b = await create("喜歡乙"),
+        c = await create("喜歡丙"),
+        d = await create("喜歡丁");
+      const likes = (user) => request("/likes", { user });
+      const ids = (value) => value.map((l) => l.targetUserId).sort();
+      assert.deepEqual(
+        (await likes(a)).value,
+        [],
+        "還沒按過喜歡時應該是空清單",
+      );
+      for (const target of [b, c]) {
+        await request("/interactions", {
+          method: "POST",
+          user: a,
+          body: { targetUserId: target.id, action: "like" },
+          expected: 201,
+        });
+      }
+      await request("/interactions", {
+        method: "POST",
+        user: a,
+        body: { targetUserId: d.id, action: "pass" },
+        expected: 201,
+      });
+      const waiting = (await likes(a)).value;
+      assert.deepEqual(
+        ids(waiting),
+        [b.id, c.id].sort(),
+        "只列出按過喜歡的人，略過的不算",
+      );
+      assert.ok(
+        waiting.every((l) => l.status === "waiting" && !l.conversationId),
+        "對方還沒回應前都是 waiting",
+      );
+      assert.ok(
+        waiting.every((l) => l.user?.userId === l.targetUserId),
+        "每一筆的 user 要就是被按喜歡的那個人",
+      );
+      assert.equal(
+        waiting.find((l) => l.targetUserId === b.id).user.displayName,
+        "喜歡乙",
+      );
+      // 送出的喜歡是單向的：被按的人自己的清單不會因此多出東西。
+      assert.deepEqual((await likes(b)).value, [], "被按喜歡的人清單仍是空的");
+      await request("/interactions", {
+        method: "POST",
+        user: b,
+        body: { targetUserId: a.id, action: "like" },
+        expected: 201,
+      });
+      const afterMatch = (await likes(a)).value;
+      const matched = afterMatch.find((l) => l.targetUserId === b.id);
+      assert.equal(matched.status, "matched", "互相喜歡後要變成 matched");
+      assert.ok(
+        matched.matchId && matched.conversationId,
+        "配對後要帶聊天室 id",
+      );
+      assert.equal(
+        afterMatch.find((l) => l.targetUserId === c.id).status,
+        "waiting",
+      );
+      // interact() 以 [id, target].sort() 決定誰是 userA；兩邊都查，每次執行都會走過兩個分支。
+      const fromB = (await likes(b)).value;
+      assert.deepEqual(ids(fromB), [a.id], "b 送出的喜歡只有 a");
+      assert.equal(fromB[0].status, "matched");
+      assert.equal(fromB[0].matchId, matched.matchId, "雙方看到同一個配對");
+      assert.equal(fromB[0].conversationId, matched.conversationId);
+      // 對方封鎖我。
+      await request("/blocks", {
+        method: "POST",
+        user: c,
+        body: { blockedUserId: a.id },
+        expected: 201,
+      });
+      assert.ok(
+        !ids((await likes(a)).value).includes(c.id),
+        "被對方封鎖後就不再出現在送出的喜歡裡",
+      );
+      // 略過之後改成喜歡：interact() 會覆寫 action，d 就會進到清單。
+      await request("/interactions", {
+        method: "POST",
+        user: a,
+        body: { targetUserId: d.id, action: "like" },
+        expected: 201,
+      });
+      assert.ok(
+        ids((await likes(a)).value).includes(d.id),
+        "略過後改按喜歡，對方要進到清單",
+      );
+      // 我封鎖對方（hidden 的另一個方向）。
+      await request("/blocks", {
+        method: "POST",
+        user: a,
+        body: { blockedUserId: d.id },
+        expected: 201,
+      });
+      assert.deepEqual(
+        ids((await likes(a)).value),
+        [b.id],
+        "我封鎖的人也不該出現在送出的喜歡裡",
+      );
+      // 解除配對：like 紀錄還在，但這段關係已結束，不該再以「等待回應」出現。
+      await request(`/matches/${matched.matchId}`, {
+        method: "DELETE",
+        user: a,
+      });
+      assert.deepEqual(
+        (await likes(a)).value,
+        [],
+        "解除配對後對方不該再出現在送出的喜歡裡",
+      );
+      assert.deepEqual((await likes(b)).value, [], "解除配對對雙方都生效");
+      console.log("已驗證：送出的喜歡清單的狀態、略過、雙向封鎖與解除配對。");
+    } finally {
+      await cleanup();
+    }
+  },
+);
 test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 20000 }, async () => {
   const origin = new URL(base).origin;
   try {

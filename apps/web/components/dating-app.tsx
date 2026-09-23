@@ -48,6 +48,7 @@ import {
   type Profile,
   type Preferences,
   type Match,
+  type SentLike,
   type Conversation,
   type Message,
   type ReplySuggestion,
@@ -150,7 +151,7 @@ function Portrait({
       {person.photos?.[0] ? (
         <img src={person.photos[0].url} alt={`${person.displayName}的照片`} />
       ) : (
-        <span>{person.displayName.slice(0, 1)}</span>
+        <span>{initialOf(person.displayName)}</span>
       )}
     </div>
   );
@@ -223,6 +224,17 @@ function dayLabel(iso: string) {
           });
   return `${day} ${clock(iso)}`;
 }
+// 按下喜歡的時間：一週內講幾天前，再久就寫日期。
+function likedLabel(iso: string) {
+  const days = daysAgo(iso);
+  if (days <= 0) return "今天按下喜歡";
+  if (days === 1) return "昨天按下喜歡";
+  if (days < 7) return `${days} 天前按下喜歡`;
+  return `${new Date(iso).toLocaleDateString("zh-TW", {
+    month: "numeric",
+    day: "numeric",
+  })} 按下喜歡`;
+}
 function matchedLabel(iso: string) {
   const hours = (Date.now() - new Date(iso).getTime()) / 3_600_000;
   if (hours >= 24) return null;
@@ -249,6 +261,109 @@ const rangeStyle = (
     "--low": (low - min) / (max - min),
     "--high": (high - min) / (max - min),
   }) as CSSProperties;
+// 一條軌道兩個把手。兩個原生 range 疊在一起時只有 22px 的把手接得到滑鼠，
+// 軌道本身是死的，兩顆重疊時下面那顆也點不到。改由外框接管指標事件：
+// 按在哪裡就把離得最近的那顆移過去，按住繼續拖也是同一顆，跟單顆拉桿一樣。
+// 原生 input 留給鍵盤與螢幕閱讀器（Tab 進去用方向鍵微調），也維持 e2e 用 fill() 操作。
+function RangePair({
+  range,
+  low,
+  high,
+  labels,
+  onChange,
+}: {
+  range: number[];
+  low: number;
+  high: number;
+  labels: [string, string];
+  // 只回報「哪一顆、要到哪」，夾住另一顆交給上層用最新狀態處理，拖太快也不會反過來。
+  onChange: (which: "low" | "high", value: number) => void;
+}) {
+  const [min, max] = range;
+  const box = useRef<HTMLDivElement>(null);
+  const lowInput = useRef<HTMLInputElement>(null);
+  const highInput = useRef<HTMLInputElement>(null);
+  // 正在拖的是哪一顆；兩顆重疊又剛好按在上面時先不決定，看第一下往哪邊拖。
+  const active = useRef<"low" | "high" | "either" | null>(null);
+  const valueAt = (clientX: number) => {
+    const el = box.current;
+    if (!el) return low;
+    const rect = el.getBoundingClientRect();
+    const thumb =
+      parseFloat(getComputedStyle(el).getPropertyValue("--thumb")) || 22;
+    // 把手中心的行程是扣掉把手寬度後的那一段（與 CSS 的軌道畫法一致）。
+    const ratio =
+      (clientX - rect.left - thumb / 2) / Math.max(1, rect.width - thumb);
+    return Math.round(min + Math.min(1, Math.max(0, ratio)) * (max - min));
+  };
+  const move = (which: "low" | "high", value: number) => {
+    onChange(which, value);
+    (which === "low" ? lowInput : highInput).current?.focus({
+      preventScroll: true,
+    });
+  };
+  const stop = (e: React.PointerEvent<HTMLDivElement>) => {
+    active.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId))
+      e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  return (
+    <div
+      ref={box}
+      className="range-pair"
+      style={rangeStyle(range, low, high)}
+      // 外框在 <label> 裡；擋掉 label 的預設行為，點軌道時焦點才不會被搶去第一個 input。
+      onClick={(e) => e.preventDefault()}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const value = valueAt(e.clientX);
+        active.current =
+          value < low
+            ? "low"
+            : value > high
+              ? "high"
+              : low === high
+                ? "either"
+                : value - low <= high - value
+                  ? "low"
+                  : "high";
+        e.currentTarget.setPointerCapture(e.pointerId);
+        if (active.current !== "either") move(active.current, value);
+      }}
+      onPointerMove={(e) => {
+        if (!active.current) return;
+        const value = valueAt(e.clientX);
+        if (active.current === "either") {
+          if (value === low) return;
+          active.current = value > low ? "high" : "low";
+        }
+        move(active.current, value);
+      }}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+    >
+      <input
+        ref={lowInput}
+        type="range"
+        aria-label={labels[0]}
+        min={min}
+        max={max}
+        value={low}
+        onChange={(e) => onChange("low", Number(e.target.value))}
+      />
+      <input
+        ref={highInput}
+        type="range"
+        aria-label={labels[1]}
+        min={min}
+        max={max}
+        value={high}
+        onChange={(e) => onChange("high", Number(e.target.value))}
+      />
+    </div>
+  );
+}
 const goalText = (codes?: string[]) =>
   codes?.length ? codes.map(traitLabel).join("、") : "";
 // 新帳號要先補齊這幾項才能進站；照片必須先存好基本資料才能上傳。
@@ -342,7 +457,7 @@ export function DatingApp() {
     const invalidate = () => {
       void client.invalidateQueries({
         predicate: (q) =>
-          ["/conversations", "/matches", "/notifications"].includes(
+          ["/conversations", "/matches", "/likes", "/notifications"].includes(
             q.queryKey[0] as string,
           ),
       });
@@ -898,6 +1013,7 @@ function Discover() {
       setMatch(result.matched);
       await client.invalidateQueries({ queryKey: ["/discovery"] });
       await client.invalidateQueries({ queryKey: ["/matches"] });
+      await client.invalidateQueries({ queryKey: ["/likes"] });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -1573,11 +1689,27 @@ function PreferencesPage() {
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  // 兩支拉桿代表同一個範圍，拖過頭時另一支跟著移動，範圍才不會反過來。
-  const setAges = (minAge: number, maxAge: number) =>
-    setValues((v) => ({ ...v, minAge, maxAge }));
-  const setHeights = (minHeightCm: number, maxHeightCm: number) =>
-    setValues((v) => ({ ...v, minHeightCm, maxHeightCm }));
+  // 兩支拉桿代表同一個範圍：動其中一支時用最新狀態把另一支夾住，拖過頭也不會反過來。
+  const setAges = (which: "low" | "high", value: number) =>
+    setValues((v) =>
+      which === "low"
+        ? { ...v, minAge: value, maxAge: Math.max(v.maxAge, value) }
+        : { ...v, minAge: Math.min(v.minAge, value), maxAge: value },
+    );
+  const setHeights = (which: "low" | "high", value: number) =>
+    setValues((v) =>
+      which === "low"
+        ? {
+            ...v,
+            minHeightCm: value,
+            maxHeightCm: Math.max(v.maxHeightCm, value),
+          }
+        : {
+            ...v,
+            minHeightCm: Math.min(v.minHeightCm, value),
+            maxHeightCm: value,
+          },
+    );
   useEffect(() => {
     if (query.data) {
       const {
@@ -1637,67 +1769,23 @@ function PreferencesPage() {
           <div className="form-grid">
             <label className="span-two">
               年齡範圍：{values.minAge}–{values.maxAge} 歲
-              <div
-                className="range-pair"
-                style={rangeStyle(ageRange, values.minAge, values.maxAge)}
-              >
-                <input
-                  type="range"
-                  aria-label="最小年齡"
-                  min={ageRange[0]}
-                  max={ageRange[1]}
-                  value={values.minAge}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setAges(next, Math.max(values.maxAge, next));
-                  }}
-                />
-                <input
-                  type="range"
-                  aria-label="最大年齡"
-                  min={ageRange[0]}
-                  max={ageRange[1]}
-                  value={values.maxAge}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setAges(Math.min(values.minAge, next), next);
-                  }}
-                />
-              </div>
+              <RangePair
+                range={ageRange}
+                low={values.minAge}
+                high={values.maxAge}
+                labels={["最小年齡", "最大年齡"]}
+                onChange={setAges}
+              />
             </label>
             <label className="span-two">
               身高範圍：{values.minHeightCm}–{values.maxHeightCm} 公分
-              <div
-                className="range-pair"
-                style={rangeStyle(
-                  heightRange,
-                  values.minHeightCm,
-                  values.maxHeightCm,
-                )}
-              >
-                <input
-                  type="range"
-                  aria-label="最低身高"
-                  min={heightRange[0]}
-                  max={heightRange[1]}
-                  value={values.minHeightCm}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setHeights(next, Math.max(values.maxHeightCm, next));
-                  }}
-                />
-                <input
-                  type="range"
-                  aria-label="最高身高"
-                  min={heightRange[0]}
-                  max={heightRange[1]}
-                  value={values.maxHeightCm}
-                  onChange={(e) => {
-                    const next = Number(e.target.value);
-                    setHeights(Math.min(values.minHeightCm, next), next);
-                  }}
-                />
-              </div>
+              <RangePair
+                range={heightRange}
+                low={values.minHeightCm}
+                high={values.maxHeightCm}
+                labels={["最低身高", "最高身高"]}
+                onChange={setHeights}
+              />
               <small>沒有填身高的人仍會出現。</small>
             </label>
             <label>
@@ -1904,10 +1992,30 @@ function VerificationPage() {
     </>
   );
 }
+const matchTags = [
+  { key: "all", label: "全部" },
+  { key: "matched", label: "已配對" },
+  { key: "liked", label: "我喜歡的" },
+] as const;
+type MatchTag = (typeof matchTags)[number]["key"];
 function MatchesPage() {
   const q = useData<Match[]>("/matches");
+  const likes = useData<SentLike[]>("/likes");
   const client = useQueryClient();
   const [error, setError] = useState("");
+  const [tag, setTag] = useState<MatchTag>("all");
+  const [person, setPerson] = useState<Card | null>(null);
+  const matches = q.data ?? [];
+  // 已配對以 /matches 為準；兩個查詢刷新有先後，這裡再排除一次，同一個人才不會出現兩張卡。
+  const matchedIds = new Set(matches.map((m) => m.otherUser.userId));
+  const liked = (likes.data ?? []).filter(
+    (l) => l.status === "waiting" && !matchedIds.has(l.targetUserId),
+  );
+  const counts: Record<MatchTag, number> = {
+    all: matches.length + liked.length,
+    matched: matches.length,
+    liked: liked.length,
+  };
   return (
     <>
       <Heading
@@ -1915,102 +2023,159 @@ function MatchesPage() {
         title="我的配對"
         text="相互喜歡，是故事的第一頁。"
       >
-        {!!q.data?.length && (
+        {!!counts.all && (
           <div className="section-bar">
-            <h2>{q.data.length} 位共同喜歡的你</h2>
+            <div className="tags selectable" role="group" aria-label="篩選">
+              {matchTags.map((t) => (
+                <button
+                  type="button"
+                  key={t.key}
+                  aria-pressed={tag === t.key}
+                  onClick={() => setTag(t.key)}
+                >
+                  {t.label} {counts[t.key]}
+                </button>
+              ))}
+            </div>
             <Link className="button secondary" href="/preferences">
               探索偏好
             </Link>
           </div>
         )}
       </Heading>
-      <ErrorText message={error || q.error?.message} />
-      {q.isLoading ? (
+      <ErrorText message={error || q.error?.message || likes.error?.message} />
+      {q.isLoading || likes.isLoading ? (
         <Loading />
-      ) : !q.data?.length ? (
+      ) : !counts.all ? (
         <Empty
           title="你的下一個火花，還在路上"
           text="到探索看看，彼此喜歡後會在這裡相遇。"
           link="/discover"
           label="開始探索"
         />
+      ) : !counts[tag] ? (
+        tag === "matched" ? (
+          <Empty
+            title="還沒有互相喜歡的人"
+            text="對方也按下喜歡後，就會出現在這裡。"
+          />
+        ) : (
+          <Empty
+            title="目前沒有等待回應的喜歡"
+            text="在探索按下喜歡的人，會先出現在這裡。"
+            link="/discover"
+            label="開始探索"
+          />
+        )
       ) : (
         <div className="match-grid">
-          {q.data.map((m) => {
-            const fresh = matchedLabel(m.createdAt);
-            return (
-              <article
-                className={fresh ? "match-card fresh" : "match-card"}
-                key={m.id}
-              >
-                <Portrait person={m.otherUser} large />
-                <div className="match-copy">
-                  {fresh && (
+          {tag !== "liked" &&
+            matches.map((m) => {
+              const fresh = matchedLabel(m.createdAt);
+              return (
+                <article
+                  className={fresh ? "match-card fresh" : "match-card"}
+                  key={m.id}
+                >
+                  <Portrait person={m.otherUser} large />
+                  <div className="match-copy">
                     <p className="match-flag">
-                      <span className="badge">新配對</span>
+                      <span className="badge">已配對</span>
                       {fresh}
                     </p>
-                  )}
+                    <h2>
+                      {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                    </h2>
+                    <p>
+                      {m.otherUser.bio ||
+                        [m.otherUser.city, goalText(m.otherUser.datingGoals)]
+                          .filter(Boolean)
+                          .join(" · ")}
+                    </p>
+                    <div className="match-actions">
+                      <Link
+                        className="button"
+                        href={`/messages/${m.conversationId}`}
+                      >
+                        開始聊天
+                      </Link>
+                      <div className="sub-actions">
+                        <button
+                          onClick={async () => {
+                            if (
+                              !window.confirm(
+                                "確定結束配對？這段對話將無法繼續。",
+                              )
+                            )
+                              return;
+                            try {
+                              await api(`/matches/${m.id}`, {
+                                method: "DELETE",
+                              });
+                              await client.invalidateQueries();
+                            } catch (e) {
+                              setError((e as Error).message);
+                            }
+                          }}
+                        >
+                          結束配對
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm("確定封鎖對方並結束配對？"))
+                              return;
+                            try {
+                              await send("/blocks", {
+                                blockedUserId: m.otherUser.userId,
+                              });
+                              await client.invalidateQueries();
+                            } catch (e) {
+                              setError((e as Error).message);
+                            }
+                          }}
+                        >
+                          封鎖
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          {tag !== "matched" &&
+            liked.map((l) => (
+              <article className="match-card" key={l.targetUserId}>
+                <Portrait person={l.user} large />
+                <div className="match-copy">
+                  <p className="match-flag">
+                    <span className="badge soft">我喜歡的</span>
+                    {likedLabel(l.createdAt)}
+                  </p>
                   <h2>
-                    {m.otherUser.displayName} <span>{m.otherUser.age}</span>
+                    {l.user.displayName} <span>{l.user.age}</span>
                   </h2>
                   <p>
-                    {m.otherUser.bio ||
-                      [m.otherUser.city, goalText(m.otherUser.datingGoals)]
+                    {l.user.bio ||
+                      [l.user.city, goalText(l.user.datingGoals)]
                         .filter(Boolean)
                         .join(" · ")}
                   </p>
                   <div className="match-actions">
-                    <Link
-                      className="button"
-                      href={`/messages/${m.conversationId}`}
+                    <button
+                      type="button"
+                      className="button secondary"
+                      onClick={() => setPerson(l.user)}
                     >
-                      開始聊天
-                    </Link>
-                    <div className="sub-actions">
-                      <button
-                        onClick={async () => {
-                          if (
-                            !window.confirm(
-                              "確定結束配對？這段對話將無法繼續。",
-                            )
-                          )
-                            return;
-                          try {
-                            await api(`/matches/${m.id}`, {
-                              method: "DELETE",
-                            });
-                            await client.invalidateQueries();
-                          } catch (e) {
-                            setError((e as Error).message);
-                          }
-                        }}
-                      >
-                        結束配對
-                      </button>
-                      <button
-                        onClick={async () => {
-                          if (!window.confirm("確定封鎖對方並結束配對？"))
-                            return;
-                          try {
-                            await send("/blocks", {
-                              blockedUserId: m.otherUser.userId,
-                            });
-                            await client.invalidateQueries();
-                          } catch (e) {
-                            setError((e as Error).message);
-                          }
-                        }}
-                      >
-                        封鎖
-                      </button>
-                    </div>
+                      看看檔案
+                    </button>
                   </div>
                 </div>
               </article>
-            );
-          })}
+            ))}
         </div>
+      )}
+      {person && (
+        <PersonDialog person={person} onClose={() => setPerson(null)} />
       )}
     </>
   );
@@ -2081,7 +2246,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                 <p>{unread} 則未讀訊息</p>
               </div>
               <div className="conversation-items">
-                {q.data.map((c, i) => (
+                {q.data.map((c) => (
                   <Link
                     href={`/messages/${c.id}`}
                     className={
@@ -2090,7 +2255,7 @@ function MessagesPage({ id, socket }: { id?: string; socket: Socket | null }) {
                     key={c.id}
                   >
                     <span className="conversation-avatar">
-                      <Avatar name={c.otherUser.displayName} tone={i} />
+                      <Portrait person={c.otherUser} />
                       {/* 綠燈只在對方上線時出現。 */}
                       {onlineIds.includes(c.otherUser.userId) && (
                         <span className="online-dot" aria-label="上線中" />
