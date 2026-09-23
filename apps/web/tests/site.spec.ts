@@ -3,6 +3,7 @@ import {
   expect,
   devices,
   type APIRequestContext,
+  type Page,
 } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 const photo = {
@@ -25,7 +26,17 @@ async function seedProfile(
       city: "台北市",
       latitude: 25.033,
       longitude: 121.5654,
-      traits: ["coffee"],
+      heightCm: 170,
+      // 必填：個性／飲食／價值觀／生活型態各一項，興趣三項。
+      traits: [
+        "humorous",
+        "likes_hotpot",
+        "values_communication",
+        "nine_to_five",
+        "coffee",
+        "movies",
+        "reading",
+      ],
       datingGoals: ["serious_relationship"],
       ...data,
     },
@@ -42,6 +53,20 @@ async function seedProfile(
     },
   });
   expect(uploaded.status()).toBe(201);
+}
+// 在表單上選齊必填的小熱愛（興趣刻意不選「旅行」，後面的測試要用它當未儲存的改動）。
+const requiredPicks = [
+  "幽默",
+  "愛火鍋",
+  "重視溝通",
+  "朝九晚五",
+  "咖啡",
+  "電影",
+  "閱讀",
+];
+async function pickRequiredTraits(page: Page, labels = requiredPicks) {
+  for (const label of labels)
+    await page.getByRole("button", { name: label, exact: true }).click();
 }
 const newEmail = () =>
   `e2e-${process.env.E2E_RUN_ID || "manual"}-${randomUUID()}@example.test`;
@@ -77,9 +102,12 @@ test("建立帳號、儲存檔案與偏好、重新整理恢復登入", async ({
   await expect(page).toHaveURL(/profile/);
   await page.getByLabel("顯示名稱", { exact: true }).fill("瀏覽器測試");
   await page.getByLabel("生日", { exact: false }).fill("1998-06-15");
-  await page.getByLabel("自我介紹").fill("本機自動化測試帳號。");
+  await page.getByLabel("身高").fill("168");
+  await page
+    .getByLabel("自我介紹")
+    .fill("本機自動化測試帳號，喜歡散步、咖啡與看展，想認識聊得來的人。");
   await page.getByRole("button", { name: "認真交往", exact: true }).click();
-  await page.getByRole("button", { name: "咖啡", exact: true }).click();
+  await pickRequiredTraits(page);
   await page.getByRole("button", { name: "儲存個人檔案" }).click();
   await expect(page.getByRole("status")).toContainText("個人檔案已儲存");
   // 還缺一張照片，其他頁面仍鎖著，直接輸入網址也會被帶回個人檔案。
@@ -147,7 +175,7 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
           displayName: name,
           birthDate: "1996-06-15",
           gender,
-          bio: "本機瀏覽器雙人測試",
+          bio: "本機瀏覽器雙人測試，互讚之後要能即時收到對方的訊息。",
         },
       );
       people.push(user);
@@ -257,12 +285,28 @@ test("個人檔案：存檔後才能上傳，上傳照片不會清掉未儲存�
   const name = page.getByLabel("顯示名稱", { exact: true });
   await name.fill("回歸測試");
   await page.getByLabel("生日", { exact: false }).fill("1995-03-20");
-  // 新帳號要把自我介紹與兩組選擇都填好才存得起來。
+  // 必填沒填齊就存不了，而且一次列出所有缺的項目。
   await page.getByRole("button", { name: "儲存個人檔案" }).click();
-  await expect(page.getByText("請寫一段自我介紹。")).toBeVisible();
-  await page.getByLabel("自我介紹").fill("回歸測試帳號。");
+  await expect(
+    page.getByText(
+      "請完成：身高、自我介紹至少 20 字（目前 0 字）、想遇見的關係選 1～2 項、個性至少選 1 項、飲食至少選 1 項、價值觀至少選 1 項、生活型態至少選 1 項、興趣至少選 3 項。",
+    ),
+  ).toBeVisible();
+  // ❤️ 由兩個 code point 組成，但使用者看到的是一個字，計數也只算一個。
+  await page.getByLabel("身高").fill("175");
+  await page.getByLabel("自我介紹").fill(`${"字".repeat(18)}❤️`);
+  await expect(page.getByText("至少 20 字，目前 19 字。")).toBeVisible();
   await page.getByRole("button", { name: "認真交往", exact: true }).click();
-  await page.getByRole("button", { name: "咖啡", exact: true }).click();
+  await pickRequiredTraits(page, requiredPicks.slice(0, -1));
+  await page.getByRole("button", { name: "儲存個人檔案" }).click();
+  await expect(
+    page.getByText(
+      "請完成：自我介紹至少 20 字（目前 19 字）、興趣至少選 3 項。",
+    ),
+  ).toBeVisible();
+  await page.getByLabel("自我介紹").fill(`${"字".repeat(19)}❤️`);
+  await expect(page.getByText("至少 20 字，目前 20 字。")).toBeVisible();
+  await pickRequiredTraits(page, requiredPicks.slice(-1));
   await page.getByRole("button", { name: "儲存個人檔案" }).click();
   await expect(page.getByRole("status")).toContainText("個人檔案已儲存");
   // 還缺照片，所以留在表單，上傳後才解鎖其他頁面。
@@ -328,7 +372,7 @@ test("多分頁同時開啟不會登出、仍即時收訊；手機開啟不存�
         displayName: i === 0 ? "多分頁甲" : "多分頁乙",
         birthDate: "1994-08-08",
         gender: i === 0 ? "woman" : "man",
-        bio: "多分頁回歸測試",
+        bio: "多分頁回歸測試：同一個帳號開好幾個分頁也不會被登出。",
       });
       people.push({ email, password, id: user.id, headers });
     }
@@ -412,7 +456,7 @@ test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩
           displayName: i === 0 ? "標籤測試甲" : "標籤測試乙",
           birthDate: "1996-06-15",
           gender: i === 0 ? "woman" : "man",
-          bio: "本機瀏覽器配對頁標籤測試",
+          bio: "本機瀏覽器配對頁標籤測試，已配對與我喜歡的要分開顯示。",
         },
       );
       people.push({ id: user.id, accessToken });
@@ -433,38 +477,39 @@ test("我的配對：已配對與我喜歡的放同一頁，用 tag 區分與篩
       .click();
     const tags = a.getByRole("group", { name: "篩選" });
     const card = a.locator(".match-card", { hasText: "標籤測試乙" });
-    await expect(card.locator(".badge")).toHaveText("我喜歡的");
-    await expect(card).toContainText("今天按下喜歡");
-    await expect(tags.getByRole("button", { name: "全部 1" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await expect(tags.getByRole("button", { name: "已配對 0" })).toBeVisible();
-    // 切到「已配對」：還沒有互相喜歡的人。
-    await tags.getByRole("button", { name: "已配對 0" }).click();
+    // 只有「已配對」與「我喜歡的」兩個 tag，預設停在已配對。
+    await expect(tags.getByRole("button")).toHaveCount(2);
+    await expect(
+      tags.getByRole("button", { name: "已配對 0" }),
+    ).toHaveAttribute("aria-pressed", "true");
     await expect(card).toBeHidden();
     await expect(
       a.getByRole("heading", { name: "還沒有互相喜歡的人" }),
     ).toBeVisible();
-    // 切到「我喜歡的」：卡片回來，可以看對方的檔案。
+    // 切到「我喜歡的」：卡片出現，可以看對方的檔案。
     await tags.getByRole("button", { name: "我喜歡的 1" }).click();
+    await expect(card.locator(".badge")).toHaveText("我喜歡的");
+    await expect(card).toContainText("今天按下喜歡");
     await card.getByRole("button", { name: "看看檔案" }).click();
     await expect(a.getByRole("dialog")).toContainText("標籤測試乙");
+    await expect(a.getByRole("dialog")).toContainText("170 公分");
     await a.getByRole("button", { name: "關閉" }).click();
     await expect(a.getByRole("dialog")).toBeHidden();
     // 對方也按了喜歡：不重新整理，卡片就從「我喜歡的」移到「已配對」。
-    await tags.getByRole("button", { name: /^全部/ }).click();
     const liked = await contexts[1].request.post("/api/v1/interactions", {
       headers: { Authorization: `Bearer ${people[1].accessToken}` },
       data: { targetUserId: people[0].id, action: "like" },
     });
     expect(liked.status()).toBe(201);
-    await expect(card.locator(".badge")).toHaveText("已配對");
-    await expect(card).toHaveCount(1);
-    await expect(tags.getByRole("button", { name: "已配對 1" })).toBeVisible();
     await expect(
       tags.getByRole("button", { name: "我喜歡的 0" }),
     ).toBeVisible();
+    await expect(card).toBeHidden();
+    await expect(
+      a.getByRole("heading", { name: "目前沒有等待回應的喜歡" }),
+    ).toBeVisible();
+    await tags.getByRole("button", { name: "已配對 1" }).click();
+    await expect(card.locator(".badge")).toHaveText("已配對");
     await card.getByRole("link", { name: "開始聊天" }).click();
     await expect(a).toHaveURL(/\/messages\//);
   } finally {
@@ -489,7 +534,7 @@ test("探索偏好：點軌道會把最近的那顆把手移過去，按住可�
         displayName: "拉桿測試",
         birthDate: "1996-06-15",
         gender: "woman",
-        bio: "本機瀏覽器拉桿測試",
+        bio: "本機瀏覽器拉桿測試，點軌道或拖曳都要移動最近的把手。",
       },
     );
     const page = await context.newPage();

@@ -63,6 +63,7 @@ import {
   traitCategories,
   traitLabel,
   traitSnapshot,
+  traitMinimums,
   traitsOf,
   type TraitRow,
 } from "@/lib/traits";
@@ -899,6 +900,7 @@ type Person = Pick<
   | "displayName"
   | "age"
   | "city"
+  | "heightCm"
   | "bio"
   | "datingIntent"
   | "traits"
@@ -930,7 +932,11 @@ function PersonCard({
         </h2>
         <p className="person-meta">
           <MapPin size={15} />
-          {[person.city, goalText(person.datingGoals)]
+          {[
+            person.city,
+            person.heightCm && `${person.heightCm} 公分`,
+            goalText(person.datingGoals),
+          ]
             .filter(Boolean)
             .join(" · ")}
         </p>
@@ -1155,6 +1161,10 @@ const cities = [
   { name: "花蓮市", lat: 23.991, lng: 121.6112 },
 ];
 const photoLimit = 8 * 1024 * 1024;
+const bioMinLength = 20;
+// 以使用者看到的字（grapheme）計算：❤️、👍🏻、國旗都算一個字，跟後端的檢查一致。
+const graphemes = new Intl.Segmenter("zh-Hant", { granularity: "grapheme" });
+const charCount = (text: string) => [...graphemes.segment(text.trim())].length;
 const photoTooLarge = "照片太大，請選擇 8 MB 以內的檔案。";
 function OnboardingPanel({
   profile,
@@ -1259,6 +1269,7 @@ function ProfileView({
   const [preview, setPreview] = useState(false);
   const person: Person = {
     ...p,
+    heightCm: p.heightCm ?? null,
     age: ageOf(p.birthDate),
     isVerified: user.isVerified,
   };
@@ -1306,7 +1317,11 @@ function ProfileView({
           <h2>
             {p.displayName}，{person.age}
           </h2>
-          <p className="profile-city">{p.city}</p>
+          <p className="profile-city">
+            {[p.city, p.heightCm && `${p.heightCm} 公分`]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
           <p className="profile-tagline">
             {[goalText(p.datingGoals), p.occupation]
               .filter(Boolean)
@@ -1399,6 +1414,7 @@ function ProfileForm({
           { name: profile.city, lat: profile.latitude, lng: profile.longitude },
         ]
       : cities;
+  const bioLength = charCount(form.watch("bio"));
   const save = form.handleSubmit(async (values) => {
     setError("");
     const city = cityOptions.find((c) => c.name === values.city);
@@ -1406,27 +1422,34 @@ function ProfileForm({
       setError("請選擇居住城市。");
       return;
     }
-    // 第一次建檔要把自我介紹與兩組選擇都填好，其他頁面才會解鎖。
-    if (onboarding) {
-      if (!values.bio.trim()) {
-        setError("請寫一段自我介紹。");
-        return;
-      }
-      if (!goals.length) {
-        setError("請選擇想遇見的關係。");
-        return;
-      }
-      if (!selected.length) {
-        setError("請至少選一個小熱愛。");
-        return;
-      }
+    // 一次列出所有還沒填的項目，不用存一次、補一項。
+    const written = charCount(values.bio);
+    const missing = [
+      !values.heightCm && "身高",
+      written < bioMinLength &&
+        `自我介紹至少 ${bioMinLength} 字（目前 ${written} 字）`,
+      !goals.length && `想遇見的關係選 1～${datingGoalLimit} 項`,
+      ...traitCategories(catalog)
+        .filter(
+          (category) =>
+            traitsOf(catalog, category).filter((t) => selected.includes(t.code))
+              .length < (traitMinimums[category] ?? 0),
+        )
+        .map(
+          (category) =>
+            `${categoryTitle(category)}至少選 ${traitMinimums[category]} 項`,
+        ),
+    ].filter(Boolean);
+    if (missing.length) {
+      setError(`請完成：${missing.join("、")}。`);
+      return;
     }
     try {
       await send(
         "/profile",
         {
           ...values,
-          heightCm: values.heightCm ? Number(values.heightCm) : null,
+          heightCm: Number(values.heightCm),
           latitude: city.lat,
           longitude: city.lng,
           traits: selected,
@@ -1511,16 +1534,17 @@ function ProfileForm({
               <small>使用城市中心估算距離，不公開精確位置。</small>
             </label>
             <label>
-              身高（選填）
+              身高
               <input
                 type="number"
                 inputMode="numeric"
                 min={100}
                 max={250}
                 placeholder="公分"
+                aria-required="true"
                 {...form.register("heightCm")}
               />
-              <small>填了才會出現在別人的身高篩選結果裡。</small>
+              <small>會顯示在你的個人卡片上。</small>
             </label>
             <label>
               職業（選填）
@@ -1537,12 +1561,18 @@ function ProfileForm({
                 rows={4}
                 maxLength={1000}
                 placeholder="最近讓你開心的小事是什麼？"
+                aria-required="true"
               />
+              {/* 目前字數不放進欄位名稱，否則每打一個字，螢幕閱讀器就重唸一次。 */}
+              <small>
+                至少 {bioMinLength} 字
+                <span aria-hidden="true">，目前 {bioLength} 字</span>。
+              </small>
             </label>
           </div>
           <div className="divider" />
           <h3>想遇見的關係</h3>
-          <p className="muted">最多選 {datingGoalLimit} 項。</p>
+          <p className="muted">選 1～{datingGoalLimit} 項。</p>
           <div className="tags selectable">
             {traitsOf(catalog, "dating_goal").map((goal) => {
               const on = goals.includes(goal.code);
@@ -1564,7 +1594,11 @@ function ProfileForm({
           <p className="muted">選擇你喜歡的事，為對話留一個起點。</p>
           {traitCategories(catalog).map((category) => (
             <fieldset className="tag-field" key={category}>
-              <legend>{categoryTitle(category)}</legend>
+              <legend>
+                {categoryTitle(category)}
+                {!!traitMinimums[category] &&
+                  `（至少 ${traitMinimums[category]} 項）`}
+              </legend>
               <div className="tags selectable">
                 {traitsOf(catalog, category).map((trait) => {
                   const on = selected.includes(trait.code);
@@ -1786,7 +1820,7 @@ function PreferencesPage() {
                 labels={["最低身高", "最高身高"]}
                 onChange={setHeights}
               />
-              <small>沒有填身高的人仍會出現。</small>
+              <small>拉到兩端代表不限；沒有填身高的人仍會出現。</small>
             </label>
             <label>
               性別偏好
@@ -1993,7 +2027,6 @@ function VerificationPage() {
   );
 }
 const matchTags = [
-  { key: "all", label: "全部" },
   { key: "matched", label: "已配對" },
   { key: "liked", label: "我喜歡的" },
 ] as const;
@@ -2003,7 +2036,7 @@ function MatchesPage() {
   const likes = useData<SentLike[]>("/likes");
   const client = useQueryClient();
   const [error, setError] = useState("");
-  const [tag, setTag] = useState<MatchTag>("all");
+  const [tag, setTag] = useState<MatchTag>("matched");
   const [person, setPerson] = useState<Card | null>(null);
   const matches = q.data ?? [];
   // 已配對以 /matches 為準；兩個查詢刷新有先後，這裡再排除一次，同一個人才不會出現兩張卡。
@@ -2012,10 +2045,10 @@ function MatchesPage() {
     (l) => l.status === "waiting" && !matchedIds.has(l.targetUserId),
   );
   const counts: Record<MatchTag, number> = {
-    all: matches.length + liked.length,
     matched: matches.length,
     liked: liked.length,
   };
+  const total = counts.matched + counts.liked;
   return (
     <>
       <Heading
@@ -2023,7 +2056,7 @@ function MatchesPage() {
         title="我的配對"
         text="相互喜歡，是故事的第一頁。"
       >
-        {!!counts.all && (
+        {!!total && (
           <div className="section-bar">
             <div className="tags selectable" role="group" aria-label="篩選">
               {matchTags.map((t) => (
@@ -2046,7 +2079,7 @@ function MatchesPage() {
       <ErrorText message={error || q.error?.message || likes.error?.message} />
       {q.isLoading || likes.isLoading ? (
         <Loading />
-      ) : !counts.all ? (
+      ) : !total ? (
         <Empty
           title="你的下一個火花，還在路上"
           text="到探索看看，彼此喜歡後會在這裡相遇。"
@@ -2069,7 +2102,7 @@ function MatchesPage() {
         )
       ) : (
         <div className="match-grid">
-          {tag !== "liked" &&
+          {tag === "matched" &&
             matches.map((m) => {
               const fresh = matchedLabel(m.createdAt);
               return (
@@ -2142,7 +2175,7 @@ function MatchesPage() {
                 </article>
               );
             })}
-          {tag !== "matched" &&
+          {tag === "liked" &&
             liked.map((l) => (
               <article className="match-card" key={l.targetUserId}>
                 <Portrait person={l.user} large />

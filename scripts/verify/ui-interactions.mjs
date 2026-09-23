@@ -23,6 +23,8 @@ const picks = [
   ["價值觀", "愛分享日常"],
   ["生活型態", "朝九晚五"],
   ["興趣", "登山"],
+  ["興趣", "露營"],
+  ["興趣", "衝浪"],
 ];
 const goals = ["認真交往", "先做朋友"];
 
@@ -51,10 +53,16 @@ check("直接輸入網址也會被導回個人檔案", true);
 await page.getByLabel("顯示名稱", { exact: true }).fill("畫面驗收");
 await page.getByLabel("生日", { exact: false }).fill("1995-04-02");
 await page.getByRole("button", { name: "儲存個人檔案" }).click();
-await page.getByText("請寫一段自我介紹。").waitFor();
-check("沒填自我介紹會被擋下", true);
-await page.getByLabel("自我介紹").fill("畫面驗收用的帳號。");
-await page.getByLabel("身高（選填）").fill("172");
+await page.getByText(/^請完成：身高、自我介紹至少 20 字/).waitFor();
+check("必填沒填齊會被擋下，並列出缺的項目", true);
+await page
+  .getByLabel("自我介紹")
+  .fill("畫面驗收用的帳號，喜歡登山、露營，也想認識新朋友。");
+check(
+  "自我介紹顯示目前字數",
+  await page.getByText("至少 20 字，目前 25 字。").isVisible(),
+);
+await page.getByLabel("身高").fill("172");
 for (const label of goals)
   await page.getByRole("button", { name: label, exact: true }).click();
 check(
@@ -103,10 +111,14 @@ check(
   "每個小標下是自己類別的標籤",
   picks.every(([g, l]) => loves.indexOf(l) > loves.indexOf(g)),
 );
+check(
+  "檢視頁顯示身高",
+  (await page.locator(".profile-city").innerText()).includes("172 公分"),
+);
 await page.getByRole("button", { name: /編輯/ }).first().click();
 check(
   "重新編輯時身高保留",
-  (await page.getByLabel("身高（選填）").inputValue()) === "172",
+  (await page.getByLabel("身高").inputValue()) === "172",
 );
 const pressed = (
   await page

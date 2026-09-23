@@ -23,6 +23,21 @@ const tags = (category: keyof typeof catalogs) =>
     )
     .max(8)
     .transform((v) => [...new Set(v)]);
+// 建檔與編輯都要填齊：身高、自我介紹、想遇見的關係 1～2 項，以及下面各類小熱愛的最低數量。
+const bioMinLength = 20;
+// 以使用者看到的字（grapheme）計算：❤️、👍🏻、國旗都算一個字，跟畫面上的計數一致。
+const graphemes = new Intl.Segmenter("zh-Hant", { granularity: "grapheme" });
+const charCount = (text: string) => [...graphemes.segment(text)].length;
+// 探索偏好的身高拉桿範圍；停在兩端代表不限（見 Social.eligible）。
+export const preferenceHeightRange = [130, 250] as const;
+const datingGoalMessage = "想遇見的關係請選 1～2 項";
+const traitMinimums: Record<string, { title: string; min: number }> = {
+  personality: { title: "個性", min: 1 },
+  diet: { title: "飲食", min: 1 },
+  value: { title: "價值觀", min: 1 },
+  lifestyle: { title: "生活型態", min: 1 },
+  interest: { title: "興趣", min: 3 },
+};
 const profileInput = z
   .object({
     displayName: z.string().trim().min(1).max(40),
@@ -39,16 +54,26 @@ const profileInput = z
         );
       }, "請填入有效生日，須年滿 18 歲"),
     gender,
-    bio: z.string().trim().max(1000).default(""),
+    bio: z
+      .string()
+      .trim()
+      .max(1000)
+      .refine(
+        (v) => charCount(v) >= bioMinLength,
+        `自我介紹至少要 ${bioMinLength} 個字`,
+      ),
     city: z.string().trim().min(1).max(80),
     latitude: z.number().min(-90).max(90),
     longitude: z.number().min(-180).max(180),
+    heightCm: z.number().int().min(100).max(250),
     // traits 資料表的代碼：dating_goal 放 datingGoals，其餘類別放 traits。
-    traits: z.array(z.string().trim().min(1)).max(40).optional(),
-    datingGoals: z.array(z.string().trim().min(1)).max(2).optional(),
+    traits: z.array(z.string().trim().min(1)).max(40),
+    datingGoals: z
+      .array(z.string().trim().min(1))
+      .min(1, datingGoalMessage)
+      .max(2, datingGoalMessage),
     // 以下為舊欄位，仍接受（匯入資料與既有測試會送），但畫面已改用 traits。
     datingIntent: intent.optional(),
-    heightCm: z.number().int().min(100).max(250).nullable().optional(),
     occupation: z.string().max(80).nullable().optional(),
     education: z.string().max(80).nullable().optional(),
     interests: tags("interests").optional(),
@@ -63,8 +88,18 @@ const preferencesInput = z
     preferredGender: z.enum(["woman", "man", "nonbinary", "any"]),
     maxDistanceKm: z.number().int().min(1).max(20000),
     // 沒送就是拉桿的兩端（不限）；舊版前端與匯入腳本不會帶這兩個欄位。
-    minHeightCm: z.number().int().min(130).max(250).default(130),
-    maxHeightCm: z.number().int().min(130).max(250).default(250),
+    minHeightCm: z
+      .number()
+      .int()
+      .min(preferenceHeightRange[0])
+      .max(preferenceHeightRange[1])
+      .default(preferenceHeightRange[0]),
+    maxHeightCm: z
+      .number()
+      .int()
+      .min(preferenceHeightRange[0])
+      .max(preferenceHeightRange[1])
+      .default(preferenceHeightRange[1]),
     // "any" 或 traits 表裡 dating_goal 的代碼，實際值在 savePreferences 檢查。
     preferredDatingIntent: z.string().trim().min(1),
   })
@@ -106,6 +141,7 @@ export function card(user: any, viewerId: string) {
     gender: p.gender,
     bio: p.bio,
     city: p.city,
+    heightCm: p.heightCm ?? null,
     datingIntent: p.datingIntent,
     interests: p.interests,
     hobbies: p.hobbies,
@@ -151,28 +187,21 @@ export class Profiles {
   async save(id: string, body: unknown) {
     const { traits, datingGoals, ...dto } = parse(profileInput, body);
     const data = { ...dto, birthDate: new Date(dto.birthDate) };
-    const selected =
-      traits || datingGoals
-        ? await this.traitIds(traits ?? [], datingGoals ?? [])
-        : null;
+    const selected = await this.traitIds(traits, datingGoals);
     await this.db.$transaction(async (tx) => {
       await tx.profile.upsert({
         where: { userId: id },
         create: { userId: id, ...data },
         update: data,
       });
-      // 有送 traits 或 datingGoals 就整組換掉，沒送就保留原本的選擇。
-      if (selected) {
-        await tx.userTrait.deleteMany({ where: { userId: id } });
-        if (selected.length)
-          await tx.userTrait.createMany({
-            data: selected.map((traitId) => ({ userId: id, traitId })),
-          });
-      }
+      await tx.userTrait.deleteMany({ where: { userId: id } });
+      await tx.userTrait.createMany({
+        data: selected.map((traitId) => ({ userId: id, traitId })),
+      });
     });
     return this.mine(id);
   }
-  // 只接受 traits 表裡的代碼，並確認類別放對位置。
+  // 只接受 traits 表裡的代碼，確認類別放對位置，且各類都選到最低數量。
   private async traitIds(traits: string[], goals: string[]) {
     const wanted = [...new Set([...traits, ...goals])];
     const rows = wanted.length
@@ -190,6 +219,16 @@ export class Profiles {
           return fail(400, "INVALID_TRAIT", "請選擇清單中的選項。");
         ids.push(trait.id);
       }
+    const counts = new Map<string, number>();
+    for (const code of new Set(traits)) {
+      const category = byCode.get(code)!.category;
+      counts.set(category, (counts.get(category) ?? 0) + 1);
+    }
+    const missing = Object.entries(traitMinimums)
+      .filter(([category, rule]) => (counts.get(category) ?? 0) < rule.min)
+      .map(([, rule]) => `${rule.title}至少選 ${rule.min} 項`);
+    if (missing.length)
+      return fail(400, "TRAITS_REQUIRED", `${missing.join("、")}。`);
     return ids;
   }
   // 選項清單（畫面用來顯示標籤與可選項目）。

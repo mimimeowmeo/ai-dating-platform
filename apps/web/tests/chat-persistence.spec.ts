@@ -26,7 +26,17 @@ async function seedProfile(
       city: "台北市",
       latitude: 25.033,
       longitude: 121.5654,
-      traits: ["coffee"],
+      heightCm: 170,
+      // 必填：個性／飲食／價值觀／生活型態各一項，興趣三項。
+      traits: [
+        "humorous",
+        "likes_hotpot",
+        "values_communication",
+        "nine_to_five",
+        "coffee",
+        "movies",
+        "reading",
+      ],
       datingGoals: ["serious_relationship"],
       ...data,
     },
@@ -60,7 +70,7 @@ async function createAccount(
       displayName,
       birthDate: "1995-03-20",
       gender,
-      bio: "聊天歷史驗證帳號",
+      bio: "聊天歷史驗證帳號，登出再登入後要看得到完整的對話。",
       // 種子資料全在台灣（緯度 22.6~25.0），這裡刻意放到南極。
       // 探索頁的距離上限預設 100km，所以這對帳號只看得到彼此，
       // 也不會擠進其他測試的候選名單裡把它們的對象推掉。
