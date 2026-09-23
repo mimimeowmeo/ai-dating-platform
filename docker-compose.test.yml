@@ -65,8 +65,12 @@ services:
       S3_SECRET_KEY: heartlink123
       S3_BUCKET: heartlink-media
       JWT_SECRET: ${JWT_SECRET:?請執行 pnpm setup}
-      # 沒有 ai 服務：給一個合法 URL 讓啟動時的 env 驗證通過即可，實際不會連線（只有臉部驗證才會用到）。
-      AI_INTERNAL_URL: http://localhost:8000
+      # 用服務名連 AI，跟主要的 docker-compose.yml 一樣。這份檔案本身沒有 ai 服務：
+      # - 單獨啟動時連不到 ai，AI 推薦回 503 固定代碼，其他功能照常（同 CI）。
+      # - 跟主要 stack 一起跑、只用這份檔案重建 api 時（例如開對外 tunnel 前重設 WEB_ORIGIN），
+      #   會連到主要 stack 正在跑的 ai 容器。以前寫 localhost:8000，在容器裡指的是 api 自己，
+      #   AI 推薦因此一律回 503（AI_UNREACHABLE）。
+      AI_INTERNAL_URL: http://ai:8000
       AI_INTERNAL_TOKEN: ${AI_INTERNAL_TOKEN:?請執行 pnpm setup}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
