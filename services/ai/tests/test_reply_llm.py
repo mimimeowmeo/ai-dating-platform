@@ -1,13 +1,15 @@
 import asyncio
 import unittest
 
+import httpx
 from pydantic_ai import Agent, ModelResponse, TextPart
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import FunctionModel
 
 from app.config import Settings
 from app.reply.errors import AIServiceError
-from app.reply.llm import TimeoutModel, build_chain, run_agent
+from app.reply.llm import TimeoutModel, build_chain, describe_failure, run_agent
 import tests.reply_helpers  # noqa: F401  匯入即關閉真實模型請求
 
 
@@ -22,6 +24,11 @@ def fast(messages, info):
     return ModelResponse(parts=[TextPart("fast")])
 
 
+def unreachable(messages, info):
+    """模擬 DNS 暫時失敗：SDK 直接丟出 httpx 的網路錯誤，Pydantic AI 不會替 Gemini 轉換它。"""
+    raise httpx.ConnectError("[Errno -5] No address associated with hostname")
+
+
 class PerModelTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_model_times_out_and_next_model_takes_over(self):
         chain = FallbackModel(
@@ -30,6 +37,34 @@ class PerModelTimeoutTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await Agent().run("hi", model=chain)
         self.assertEqual((result.output, result.response.model_name), ("fast", "fast"))
+
+    async def test_network_error_falls_back_to_next_model(self):
+        # 以前網路錯誤會原樣往外丟：不換備援模型，服務還會回 500。
+        chain = FallbackModel(
+            TimeoutModel(FunctionModel(unreachable, model_name="gemini"), 5),
+            TimeoutModel(FunctionModel(fast, model_name="fast"), 5),
+        )
+        result = await Agent().run("hi", model=chain)
+        self.assertEqual((result.output, result.response.model_name), ("fast", "fast"))
+
+    async def test_whole_chain_failure_is_logged_without_chat_content(self):
+        chain = FallbackModel(
+            TimeoutModel(FunctionModel(slow, model_name="ollama"), 0.05),
+            TimeoutModel(FunctionModel(unreachable, model_name="gemini"), 5),
+        )
+        with self.assertLogs("app.reply.llm", level="WARNING") as logs:
+            with self.assertRaises(AIServiceError) as caught:
+                await run_agent(Agent(), "我的私密聊天內容", chain, 5, "LLM_NOT_CONFIGURED", "LLM_UNAVAILABLE")
+        self.assertEqual(caught.exception.code, "LLM_UNAVAILABLE")
+        self.assertEqual(
+            logs.output,
+            ["WARNING:app.reply.llm:LLM_UNAVAILABLE: ollama: timed out after 0.05s → gemini: network error: ConnectError"],
+        )
+        self.assertNotIn("私密", "\n".join(logs.output))
+
+    def test_describe_failure_keeps_status_code_but_not_the_body(self):
+        error = ModelHTTPError(503, "gemini-3.8-flash", {"error": {"message": "可能夾帶 prompt 的內容"}})
+        self.assertEqual(describe_failure(error), "gemini-3.8-flash: HTTP 503")
 
     async def test_single_slow_model_becomes_unavailable_before_total_timeout(self):
         model = TimeoutModel(FunctionModel(slow, model_name="slow"), 0.1)

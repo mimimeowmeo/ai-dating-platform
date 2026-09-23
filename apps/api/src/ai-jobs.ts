@@ -39,6 +39,11 @@ const STYLE_EVERY = 200;
 /** 同一位使用者的風格卡工作 1 小時內只排一次，避免熱門使用者一直重算。 */
 const STYLE_THROTTLE_MS = 60 * 60 * 1000;
 /**
+ * 推薦時發現沒有風格卡而排的萃取，延後這麼久才開始（2026-09-23）。
+ * 使用者這時正在按推薦（常常接著按「換一批」），立刻萃取會跟推薦搶同一個 Ollama。
+ */
+export const STYLE_AFTER_SUGGEST_DELAY_MS = 3 * 60 * 1000;
+/**
  * 送出的工作設定：失敗時重試 3 次（指數退避），成功就刪除。
  * 失敗的保留 50 筆方便查問題；job 內容含聊天訊息，不無限期留在 Redis。
  */
@@ -215,9 +220,11 @@ export class AiJobs implements OnModuleInit, OnModuleDestroy {
    *
    * 產生推薦時發現對方沒有風格卡也會呼叫這裡（規格 8 的「需要時發現沒有」），
    * 所以用 1 小時的 deduplication 節流：期間內同一位使用者只會排一次。
+   * 那種情況會傳 delayMs（STYLE_AFTER_SUGGEST_DELAY_MS），讓萃取晚幾分鐘才開始，
+   * 不跟使用者接下來的推薦（例如「換一批」）搶同一個模型。
    * 沒有任何真人訊息時不排：AI 服務只會用 bio 做冷啟動，那件事線上就能做，不用背景工作。
    */
-  async enqueueStyle(userId: string) {
+  async enqueueStyle(userId: string, delayMs = 0) {
     const user = await this.db.user.findUnique({
       where: { id: userId },
       select: { profile: { select: { bio: true } } },
@@ -236,6 +243,7 @@ export class AiJobs implements OnModuleInit, OnModuleDestroy {
     };
     await this.queue.add("build-style", job, {
       ...JOB_OPTIONS,
+      ...(delayMs > 0 ? { delay: delayMs } : {}),
       deduplication: { id: `style:${userId}`, ttl: STYLE_THROTTLE_MS },
     });
   }
