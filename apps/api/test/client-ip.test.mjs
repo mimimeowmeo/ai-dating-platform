@@ -11,7 +11,7 @@ const skip = viaNginx ? false : "TEST_API_URL 沒有經過 nginx";
 const redis = new Redis(process.env.REDIS_URL, { lazyConnect: true });
 const used = [];
 after(async () => {
-  const keys = used.flatMap((ip) => [`rate:auth:${ip}`, `rate:refresh:${ip}`]);
+  const keys = used.flatMap((b) => [`rate:auth:${b}`, `rate:refresh:${b}`]);
   if (keys.length) await redis.del(...keys);
   redis.disconnect();
 });
@@ -19,6 +19,14 @@ function fakeIp() {
   const ip = `198.${18 + randomInt(2)}.${randomInt(256)}.${randomInt(1, 255)}`;
   used.push(ip);
   return ip;
+}
+function fakeIpv6Block() {
+  const [g3, hi] = [randomInt(1, 0x10000).toString(16), randomInt(256)];
+  const bucket = `2001:db8:${g3}:${(hi << 8).toString(16)}::/56`;
+  used.push(bucket);
+  const address = (n) =>
+    `2001:db8:${g3}:${((hi << 8) | (n & 255)).toString(16)}::${n.toString(16)}`;
+  return { bucket, address };
 }
 const viaCloudflare = (ip, spoofed) => ({
   "CF-Connecting-IP": ip,
@@ -65,6 +73,24 @@ test(
     assert.equal(await redis.get(`rate:auth:${a}`), "21");
     assert.equal(await redis.get(`rate:auth:${b}`), "1");
     assert.equal(await redis.exists(`rate:auth:${spoofed}`), 0);
+  },
+);
+test(
+  "cloudflare-tunnel：同一段 IPv6 /56 共用額度，輪換位址也繞不過",
+  { skip: skip || (!tunnel && "NGINX_CLIENT_IP 不是 cloudflare-tunnel") },
+  async () => {
+    const [block, other, spoofed] = [
+      fakeIpv6Block(),
+      fakeIpv6Block(),
+      fakeIp(),
+    ];
+    assert.notEqual(block.bucket, other.bucket);
+    for (let n = 1; n <= 20; n++)
+      assert.equal(await login(viaCloudflare(block.address(n), spoofed)), 400);
+    assert.equal(await login(viaCloudflare(block.address(999), spoofed)), 429);
+    assert.equal(await login(viaCloudflare(other.address(1), spoofed)), 400);
+    assert.equal(await redis.get(`rate:auth:${block.bucket}`), "21");
+    assert.equal(await redis.get(`rate:auth:${other.bucket}`), "1");
   },
 );
 test(
