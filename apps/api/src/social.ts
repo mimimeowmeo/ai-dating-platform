@@ -11,7 +11,13 @@ import {
   pairLock,
   Infrastructure,
 } from "./core";
-import { Profiles, card, traitCodes, userInclude } from "./profiles";
+import {
+  Profiles,
+  card,
+  preferenceHeightRange,
+  traitCodes,
+  userInclude,
+} from "./profiles";
 import { MessageOrigins } from "./ai-origins";
 import { AiJobs } from "./ai-jobs";
 const messageInput = z
@@ -45,9 +51,13 @@ export class Social {
       // 關係期待改看 traits 的 dating_goal：偏好「都可以」，或對方的交友目標包含它。
       (p.preferredDatingIntent === "any" ||
         traitCodes(b, true).includes(p.preferredDatingIntent)) &&
-      // 沒填身高的人無從判斷，不因身高條件被排除。
+      // 沒填身高的人無從判斷，不因身高條件被排除。拉桿停在兩端代表不限：
+      // 身高必填後，低於 130 的人沒辦法留空，不能讓預設偏好把他們擋掉。
       (q.heightCm == null ||
-        (q.heightCm >= p.minHeightCm && q.heightCm <= p.maxHeightCm)) &&
+        ((p.minHeightCm <= preferenceHeightRange[0] ||
+          q.heightCm >= p.minHeightCm) &&
+          (p.maxHeightCm >= preferenceHeightRange[1] ||
+            q.heightCm <= p.maxHeightCm))) &&
       distance(a.profile, q) <= p.maxDistanceKm
     );
   }

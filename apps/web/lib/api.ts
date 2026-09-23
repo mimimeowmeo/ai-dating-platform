@@ -13,6 +13,7 @@ export type Card = {
   gender: string;
   bio: string;
   city: string;
+  heightCm: number | null;
   datingIntent: string;
   interests: string[];
   hobbies: string[];

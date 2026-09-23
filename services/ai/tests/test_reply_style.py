@@ -42,6 +42,13 @@ class StyleStatsTests(unittest.TestCase):
         self.assertIn("啦", result.particles)
         self.assertIn("喔", result.particles)
 
+    def test_fast_back_and_forth_chat_does_not_break_burst_limit(self):
+        # 一來一往聊得很快：這個人每則都在上一則的 60 秒內，整段會被算成同一次連發。
+        # 以前 burstMean 會超過欄位上限 50，StyleStats 驗證失敗，整個風格卡萃取跟著失敗。
+        messages = [own("好喔", index * 0.5) for index in range(120)]
+        result = compute_style_stats(messages)
+        self.assertEqual((result.messageCount, result.burstMean), (120, 50.0))
+
     def test_empty_messages_fall_back_to_site_defaults(self):
         result = compute_style_stats([])
         self.assertEqual(result.messageCount, 0)

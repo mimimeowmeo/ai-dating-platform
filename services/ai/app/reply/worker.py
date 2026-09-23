@@ -5,6 +5,8 @@
 
 執行：`python -m app.reply.worker`；健康檢查：`python -m app.reply.worker_health`。
 萃取模型（Ollama）一次只能好好處理一個請求，所以 concurrency 設為 1。
+同一個 Ollama 也負責線上推薦，所以背景工作每次呼叫模型前，會先讓正在進行的「AI 推薦」
+跑完（OnlinePriority，見 priority.py），避免使用者按推薦時排在背景萃取後面而逾時。
 """
 
 import asyncio
@@ -19,6 +21,7 @@ from pydantic import ValidationError
 from ..config import Settings
 from ..worker import maintain_heartbeat
 from .errors import AIServiceError
+from .priority import OnlinePriority
 from .schemas import ChunkRequest, StyleProfileRequest, SummaryRequest, TopicSpanRequest
 from .service import ReplyAIService, build_service
 
@@ -88,10 +91,13 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stopped.set)
     client = redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=3, socket_timeout=3)
+    service = build_service(settings)
+    # 背景工作每次呼叫模型前，先等 NestJS 記在 Redis 裡、正在進行的線上推薦跑完（priority.py）。
+    service.yield_to_online_requests(OnlinePriority(client).wait_for_idle)
     results = Queue(RESULTS_QUEUE, {"connection": settings.redis_url})
     worker = Worker(
         QUEUE_NAME,
-        make_processor(build_service(settings), results),
+        make_processor(service, results),
         {"connection": settings.redis_url, "concurrency": 1, "autorun": False},
     )
     # 只記錄固定代碼，避免第三方例外把聊天內容或連線憑證寫進日誌。

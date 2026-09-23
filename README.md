@@ -158,6 +158,7 @@ Phase 8–10 的其他推薦 AI、對話分析與持續學習尚未實作。Phas
 - [Prisma schema](apps/api/prisma/schema.prisma)：實際資料庫來源；[原始 ERD](docs/database/ERD.md) 保留作設計參考。
 - [AI 服務說明](services/ai/README.md)：provider 契約、環境設定與測試。
 - [AI 推薦回覆規格](docs/ai/REPLY-SUGGESTIONS-SPEC.md)：功能規則、資料來源、內部 API、資料表與實測紀錄。
+- [AI 聊天輔助使用者指南](docs/ai/AI-ASSIST-USER-GUIDE.md)：給使用者看的說明：怎麼用、語氣與特徵怎麼擷取、寫法比例怎麼算。
 - [安全](SECURITY.md)／[資料處理](PRIVACY.md)／[貢獻方式](CONTRIBUTING.md)。
 
 ### 本機登入網址

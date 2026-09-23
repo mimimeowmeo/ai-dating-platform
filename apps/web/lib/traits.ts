@@ -108,6 +108,14 @@ export const groupTraits = (rows: TraitRow[], codes: string[]) => {
   ].map((category) => ({ category, codes: groups.get(category) ?? [] }));
 };
 export const datingGoalLimit = 2;
+// 建檔與編輯時各類至少要選幾項，與後端 profiles.ts 的 traitMinimums 一致。
+export const traitMinimums: Record<string, number> = {
+  personality: 1,
+  diet: 1,
+  value: 1,
+  lifestyle: 1,
+  interest: 3,
+};
 export const traitsOf = (rows: TraitRow[], category: string) =>
   rows.filter((row) => row.category === category);
 let labels = new Map(traitSnapshot.map((row) => [row.code, row.label]));

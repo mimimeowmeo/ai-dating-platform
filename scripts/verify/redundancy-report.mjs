@@ -42,7 +42,7 @@ console.log(
   `| \`profiles.foods\` | ${profiles[3]} / ${profiles[0]} | 🟡 同上 |`,
 );
 console.log(
-  `| \`profiles.height_cm\` | ${profiles[4]} / ${profiles[0]} | 🟢 使用中（探索偏好的身高篩選） |`,
+  `| \`profiles.height_cm\` | ${profiles[4]} / ${profiles[0]} | 🟢 使用中（必填；個人卡片與個人主頁顯示、探索偏好的身高篩選） |`,
 );
 console.log(
   `| \`profiles.occupation\` | ${profiles[5]} / ${profiles[0]} | 🟢 個人檔案可填、檢視頁顯示 |`,

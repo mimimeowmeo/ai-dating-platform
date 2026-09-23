@@ -19,8 +19,12 @@ Base path: `/api/v1`
 ## Profile
 
 - `GET /profile`
-- `PUT /profile`
-- `GET /profile/:userId`
+- `PUT /profile` — 建檔與編輯都要帶齊必填欄位，缺的話回 400：
+  `heightCm`（100–250）、`bio`（去掉頭尾空白後至少 20 個字，以使用者看到的字〔grapheme〕計算，❤️、👍🏻、國旗都算一個字）、
+  `datingGoals`（1–2 項），以及 `traits` 內 `personality`／`diet`／`value`／`lifestyle` 各至少 1 項、`interest` 至少 3 項。
+  分兩階段回報：先檢查欄位格式與必填（`VALIDATION_ERROR`，同一階段的問題一起列出）；都通過後，
+  再檢查各類小熱愛的數量（`TRAITS_REQUIRED`，一次列出所有不足的類別）。
+- `GET /profile/:userId` — 回傳對方的卡片，含 `heightCm`（舊資料沒填時為 `null`）。
 - `POST /profile/photos`
 - `DELETE /profile/photos/:photoId`
 
@@ -28,13 +32,14 @@ Base path: `/api/v1`
 
 - `GET /preferences`
 - `PUT /preferences` — `minAge`／`maxAge` 收 18–130，`minHeightCm`／`maxHeightCm` 收 130–250（沒帶就回到 130／250＝不限），
-  兩組都要求下限不大於上限；`maxDistanceKm` 1–20000。身高條件只過濾有填身高的人。
+  兩組都要求下限不大於上限；`maxDistanceKm` 1–20000。身高拉桿停在 130／250 代表那一端不限
+  （身高必填後，低於 130 的人才不會被預設偏好擋掉）；身高條件只過濾有填身高的人。
 
 ## Traits
 
 - `GET /traits` — 回傳 `traits` 資料表的全部代碼（`{ category, code, label }`）。
   `dating_goal` 供「想遇見的關係」與探索偏好的「關係期待」使用，其餘五類（`personality`／`diet`／`value`／`lifestyle`／`interest`）供「我的小熱愛」使用。
-- `PUT /profile` 以 `traits`（最多 40 項）與 `datingGoals`（最多 2 項）送出選擇，`GET /profile`、`GET /profile/:userId`、`GET /discovery` 會一併回傳。
+- `PUT /profile` 以 `traits`（最多 40 項）與 `datingGoals`（1–2 項）送出選擇，每次都整組換掉；各類最低數量見上方 Profile。`GET /profile`、`GET /profile/:userId`、`GET /discovery` 會一併回傳。
 - `PUT /preferences` 的 `preferredDatingIntent` 收 `any` 或 `dating_goal` 的代碼。
 
 ## Interests / Hobbies / Foods（舊欄位，僅供匯入相容）
@@ -56,6 +61,8 @@ Base path: `/api/v1`
 
 - `GET /discovery`
 - `POST /interactions`
+- `GET /likes` — 我按過喜歡的人，`status` 為 `waiting`（等對方回應）或 `matched`（附 `matchId`／`conversationId`）。
+  雙向封鎖、沒有個人檔案、配對已結束的人不列出；依按喜歡的時間由新到舊，最多 200 筆。
 - `GET /matches`
 - `GET /matches/:matchId`
 - `DELETE /matches/:matchId`

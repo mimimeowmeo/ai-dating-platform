@@ -5,6 +5,7 @@
 > 這份文件是此功能的單一規格來源；AI 內部 API 的欄位細節以
 > [`services/ai/app/reply/schemas.py`](../../services/ai/app/reply/schemas.py) 為準。
 > 資料庫存取邊界見 [ADR 0002](../architecture/adr/0002-db-ownership.md)。
+> 給使用者看的白話說明見 [AI 聊天輔助使用者指南](AI-ASSIST-USER-GUIDE.md)。
 
 ## 0. 開發順序與目前範圍
 
@@ -207,6 +208,21 @@ AI 服務依聊天室狀態自動判斷（後端也可以直接指定）：
 - 結果放進 queue `ai-results`，job 名稱與來源相同，資料為 `{ "sourceJobId", "name", "key", "result" }`（`key` 是 conversationId 或 userId）。
 - 失敗時 worker 丟出固定代碼（例如 `EXTRACTION_UNAVAILABLE`），由 BullMQ 依 job 設定重試；錯誤紀錄不含訊息內容。
 
+### 8.1 線上推薦優先（2026-09-23）
+萃取模型和線上推薦共用 Ollama Cloud，而這個帳號同時只處理 1 個請求：實測同時送 3 個推薦，
+分別在 1.7／3.2／4.9 秒依序完成。背景萃取正在跑時使用者按「AI 推薦」，推薦就得排隊，
+可能超過單一模型 12 秒的逾時；如果備援的 Gemini 剛好也被限流，就會回 503。
+
+- **NestJS 標記**：呼叫 `/reply-suggestions` 的期間，把 requestId 記在 Redis sorted set `ai:online-requests`
+  （分數是開始時間，單位毫秒），結束後不論成功失敗都會移除（`apps/api/src/ai-priority.ts`）。
+- **worker 讓路**：每次呼叫萃取模型之前（風格卡的每一批、摘要），先看這個集合。有推薦在進行，就每 0.25 秒
+  再看一次，最多等 30 秒（`services/ai/app/reply/priority.py`）。
+  - 超過 45 秒的紀錄視為殘骸，不再等它。
+  - Redis 出錯時不等，寧可偶爾搶到，也不能讓背景工作卡住。
+- **延後萃取**：推薦時發現沒有風格卡而排的萃取，延後 3 分鐘才開始，避開使用者接著按的「換一批」。
+- **限制**：已經送出的背景請求無法中途插隊，推薦最多要等「正在跑的那一批」。
+  實測最大的一批（約 5,300 tokens）在 Ollama 閒置時約 2.8 秒。
+
 ## 9. 資料表（已實作）
 
 | 表 | 主要欄位 | 索引／備註 |
@@ -250,7 +266,15 @@ Gemini 免費層的限額以「專案」計算、每日額度在太平洋時間�
 **Ollama Cloud**：模型跑在 Ollama 的伺服器上，不佔用本機記憶體；官方說明不會拿提示與回應訓練模型。
 Pydantic AI 官方文件說明 Ollama Cloud 不會強制套用 JSON schema，所以模型鏈中有 Ollama Cloud 時，
 結構化輸出自動改用 ToolOutput（`app/reply/llm.py` 的 `structured_output`），其餘情況用 NativeOutput。
-免費方案只有少量起始額度、一次 1 個請求，實際用量上限到 ollama.com 的 usage 頁面查看。
+免費方案只有少量起始額度、一次 1 個請求，實際用量上限到 ollama.com 的 usage 頁面查看；
+背景萃取因此會讓路給線上推薦（見 8.1）。
+
+**連線失敗與日誌**：
+- 模型 SDK 直接丟出的網路層錯誤（httpx／httpx2 的 `TransportError`，例如 DNS 暫時失敗），會跟逾時一樣轉成
+  `ModelAPIError`，讓備援鏈換下一個模型（`TimeoutModel`）。
+  - 為什麼需要：Pydantic AI 只替 Gemini 轉換 google 的 `APIError`，網路錯誤原本會繞過備援，變成服務的 500。
+- 整條鏈都失敗時，`run_agent` 記一行 warning，只含錯誤類型、模型名稱與 HTTP 狀態碼，不含 prompt 或模型輸出。
+  例如：`LLM_UNAVAILABLE: gemma4:31b: timed out after 12s → gemini-3.8-flash: HTTP 503`。
 
 ## 11. 可調參數（程式內常數）
 
@@ -264,6 +288,8 @@ Pydantic AI 官方文件說明 Ollama Cloud 不會強制套用 JSON schema，所
 | 切片 | 30 分鐘、12 則、400 tokens、重疊 2 則 | `chunking.py` |
 | AI 話題區段 | 開話題的 intent：提問、邀約、呼應、分享；最多 30 則；每 3 則一組；相似度門檻 0.5；連續 2 組低於門檻才算換話題 | `topics.py` |
 | 風格卡 | 高信心門檻 30 則；每批約 6,000 tokens；`[AI話題]` 話題權重 0.3；特徵句不得與原文共用 8 個字以上 | `extraction.py` |
+| 線上推薦優先 | 殘骸判定 45 秒；輪詢 0.25 秒；最多讓 30 秒 | `priority.py`、`apps/api/src/ai-priority.ts` |
+| 推薦觸發的風格卡萃取延後 | 3 分鐘 | `apps/api/src/ai-jobs.ts`（`STYLE_AFTER_SUGGEST_DELAY_MS`） |
 | 全站平均（暫定值） | 平均字數 7.1 | `style.py`，建議由後端定期用 SQL 計算後傳入 |
 
 ## 12. 評估
@@ -424,3 +450,13 @@ API 以 ts-node 跑在 3005，AI 服務與 worker 在本機。
 | 聊天室已經有訊息 | `later／blend`，5 則都標 `blend` | 1 次 | 5 則 |
 | 聊天室的第一則訊息 | `first_message／partner`，5 則都標 `partner` | 1 次 | 5 則，短句、帶「喔」，照 B 的寫法 |
 | 完全沒有資料根據 | —（`first_message／requester`） | **0 次** | `empty`，提示「沒有可推薦的句子」 |
+
+## 18. 用 tunnel 對外測試時的 503 排查（2026-09-23）
+
+| # | 錯誤代碼（`ai_suggestion_requests.error_code`） | 原因 | 處理 |
+|---|---|---|---|
+| 1 | `AI_UNREACHABLE`（0.1 秒內失敗） | 用 `docker-compose.test.yml` 重建 api 時，`AI_INTERNAL_URL` 是 `localhost:8000`，連到 api 容器自己 | PR #7：改成 `http://ai:8000` |
+| 2 | `LLM_UNAVAILABLE`（24.3 秒後失敗） | 推薦排在背景萃取後面，Ollama 超過 12 秒；備援 Gemini 同時回 `503 high demand` | 背景讓路（8.1）；網路錯誤也會觸發備援；失敗時記下各模型的錯誤類型與狀態碼（第 10 節） |
+
+第 2 項的證據：推薦在 06:50:12 失敗，同一位使用者的風格卡在 06:50:14 才萃取完成；那張卡是他第一次按推薦時觸發的。
+AI 服務原本不記錄模型錯誤，當時只能手動重現，所以這次一併補上日誌。

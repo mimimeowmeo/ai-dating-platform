@@ -10,6 +10,22 @@ const origin = new URL(base).origin;
 const db = new PrismaClient();
 const accounts = [];
 const password = `Test-${randomUUID()}-safe`;
+// 個人檔案的必填欄位：身高、20 字以上的自我介紹、想遇見的關係 1～2 項、
+// 個性／飲食／價值觀／生活型態各至少 1 項、興趣至少 3 項。
+const requiredProfile = {
+  heightCm: 165,
+  bio: "喜歡週末去咖啡店看書，也常常一個人出門散步拍照。",
+  datingGoals: ["serious_relationship"],
+  traits: [
+    "humorous",
+    "likes_hotpot",
+    "values_communication",
+    "nine_to_five",
+    "coffee",
+    "travel",
+    "reading",
+  ],
+};
 after(() => db.$disconnect());
 async function request(
   path,
@@ -88,7 +104,7 @@ async function create(name) {
       city: "台北市",
       latitude: 25.033,
       longitude: 121.5654,
-      bio: "自動化整合測試帳號",
+      ...requiredProfile,
       datingIntent: "serious",
       interests: ["咖啡"],
       hobbies: ["攝影"],
@@ -199,7 +215,7 @@ test(
         city: "高雄市",
         latitude: 22.6273,
         longitude: 120.3014,
-        bio: "自動化整合測試帳號",
+        ...requiredProfile,
         datingIntent: "serious",
         interests: [],
         hobbies: [],
@@ -866,6 +882,95 @@ test(
     }
   },
 );
+test("個人檔案必填：身高、自我介紹 20 字、想遇見的關係 1～2 項、各類小熱愛", async () => {
+  try {
+    const user = await register();
+    const valid = {
+      displayName: "必填測試",
+      birthDate: "1996-01-01",
+      gender: "woman",
+      city: "台北市",
+      latitude: 25.033,
+      longitude: 121.5654,
+      ...requiredProfile,
+    };
+    const without = (code) => valid.traits.filter((c) => c !== code);
+    for (const [patch, pattern] of [
+      [{ heightCm: undefined }, /身高/],
+      [{ heightCm: 99 }, /身高/],
+      // 18 個字＋❤️：UTF-16 長度 21、code point 20，但使用者看到的只有 19 個字。
+      [{ bio: `${"字".repeat(18)}❤️` }, /自我介紹至少要 20 個字/],
+      [{ bio: `  ${"字".repeat(19)}  ` }, /自我介紹至少要 20 個字/],
+      [{ datingGoals: [] }, /想遇見的關係請選 1～2 項/],
+      [
+        { datingGoals: ["serious_relationship", "friends_first", "chat_only"] },
+        /想遇見的關係請選 1～2 項/,
+      ],
+      [{ traits: without("humorous") }, /個性至少選 1 項/],
+      [{ traits: without("likes_hotpot") }, /飲食至少選 1 項/],
+      [{ traits: without("values_communication") }, /價值觀至少選 1 項/],
+      [{ traits: without("nine_to_five") }, /生活型態至少選 1 項/],
+      [{ traits: without("reading") }, /興趣至少選 3 項/],
+      [{ traits: undefined }, /我的小熱愛/],
+    ]) {
+      const r = await request("/profile", {
+        method: "PUT",
+        user,
+        body: { ...valid, ...patch },
+        expected: 400,
+      });
+      assert.match(r.value.message, pattern, JSON.stringify(patch));
+    }
+    assert.equal(
+      await db.profile.findUnique({ where: { userId: user.id } }),
+      null,
+      "驗證沒過就不該建立檔案",
+    );
+    // 剛好 20 個字（❤️ 算一個字）可以存。
+    const saved = await request("/profile", {
+      method: "PUT",
+      user,
+      body: { ...valid, bio: `${"字".repeat(19)}❤️` },
+    });
+    assert.equal(saved.value.heightCm, 165);
+    // 別人看到的卡片也要帶出身高。
+    const other = await create("必填對象");
+    assert.equal(
+      (await request(`/profile/${user.id}`, { user: other })).value.heightCm,
+      165,
+    );
+    // 身高低於偏好拉桿下限（130）的人：預設偏好停在兩端＝不限，雙方都要看得到彼此；
+    // 對方把下限調高，才會被濾掉。
+    await request("/profile", {
+      method: "PUT",
+      user,
+      body: { ...valid, heightCm: 120 },
+    });
+    const sees = async (viewer, target) =>
+      (await request("/discovery", { user: viewer })).value.some(
+        (c) => c.userId === target.id,
+      );
+    assert.ok(await sees(other, user), "身高 120 的人在預設偏好下要看得到");
+    assert.ok(await sees(user, other), "身高 120 的人自己的探索不能是空的");
+    await request("/preferences", {
+      method: "PUT",
+      user: other,
+      body: {
+        minAge: 18,
+        maxAge: 99,
+        preferredGender: "any",
+        preferredDatingIntent: "any",
+        maxDistanceKm: 100,
+        minHeightCm: 150,
+        maxHeightCm: 250,
+      },
+    });
+    assert.ok(!(await sees(other, user)), "下限調到 150 就要濾掉身高 120 的人");
+    console.log("已驗證：個人檔案必填規則、卡片上的身高、偏好拉桿兩端＝不限。");
+  } finally {
+    await cleanup();
+  }
+});
 test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 20000 }, async () => {
   const origin = new URL(base).origin;
   try {
