@@ -24,8 +24,8 @@
 
 - `GET /profile`、`PUT /profile` → 自己的 Profile。
 - Profile：`userId,displayName,birthDate,gender,bio,city,latitude,longitude,datingIntent,heightCm,occupation,education,interests,hobbies,foods,photos`；標籤為字串陣列。
-- `PUT /profile` 接受上述可編輯欄位，不接受 userId、photos、isVerified。
-- `GET /profile/:userId` → 公開卡片 `{userId,displayName,age,gender,bio,city,datingIntent,interests,hobbies,foods,photos,isVerified}`。
+- `PUT /profile` 接受上述可編輯欄位，不接受 userId、photos、isVerified。必填：`heightCm`、至少 20 字的 `bio`、`datingGoals` 1–2 項，`traits` 的個性／飲食／價值觀／生活型態各至少 1 項、興趣至少 3 項（詳見 `docs/api/API-CATALOG.md`）。
+- `GET /profile/:userId` → 公開卡片 `{userId,displayName,age,gender,bio,city,heightCm,datingIntent,interests,hobbies,foods,photos,isVerified}`。
 - Photo：`id,url,isAvatar,displayOrder`；`POST /profile/photos` multipart `file` → Photo；`DELETE /profile/photos/:photoId` → `{ok:true}`。
 - 上傳照片前必須已有個人檔案，否則回 409 `PROFILE_REQUIRED`。`displayOrder` 取現有最大值 + 1，不會重複；照片依 `displayOrder`、建立時間排序，第一張即主照片。圖片錯誤分別回報無法讀取、格式（僅 JPEG／PNG／WebP 靜態圖）、尺寸（至少 64×64）與解析度（至多 2400 萬像素）。
 - `GET/PUT /preferences` → `{minAge,maxAge,preferredGender,maxDistanceKm,preferredDatingIntent}`。

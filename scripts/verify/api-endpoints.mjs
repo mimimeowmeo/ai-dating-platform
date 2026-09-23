@@ -88,14 +88,22 @@ const saved = await call("/profile", {
     displayName: "掃描甲",
     birthDate: "1994-02-02",
     gender: "woman",
-    bio: "API 驗收帳號",
+    bio: "API 驗收帳號，檢查每個欄位都寫進對應的資料表。",
     city: "台中市",
     latitude: 24.147,
     longitude: 120.673,
     heightCm: 168,
     occupation: "工程師",
     education: "碩士",
-    traits: ["coffee", "hiking"],
+    traits: [
+      "coffee",
+      "hiking",
+      "reading",
+      "humorous",
+      "likes_seafood",
+      "values_trust",
+      "nine_to_five",
+    ],
     datingGoals: ["serious_relationship"],
   },
 });
@@ -112,7 +120,8 @@ const traitRow = db(
 );
 check(
   "↳ traits/datingGoals → user_traits",
-  traitRow === "coffee,hiking,serious_relationship",
+  traitRow ===
+    "coffee,hiking,humorous,likes_seafood,nine_to_five,reading,serious_relationship,values_trust",
   traitRow,
 );
 const mine = await call("/profile", { token });
@@ -120,7 +129,7 @@ check(
   "GET /profile",
   mine.status === 200 &&
     mine.data.heightCm === 168 &&
-    mine.data.traits.length === 2,
+    mine.data.traits.length === 7,
 );
 
 const photo = await call("/profile/photos", {

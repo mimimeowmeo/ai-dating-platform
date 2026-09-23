@@ -48,6 +48,8 @@ const fieldLabels: Record<string, string> = {
   longitude: "經度",
   datingIntent: "想遇見的關係",
   heightCm: "身高",
+  traits: "我的小熱愛",
+  datingGoals: "想遇見的關係",
   occupation: "職業",
   education: "學歷",
   interests: "興趣",
