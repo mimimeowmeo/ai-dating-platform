@@ -1,0 +1,95 @@
+name: Deploy to GCP test VM
+# main 的 CI 通過後，SSH 到 heartlink-test 執行 ~/deploy.sh（authorized_keys 強制指令，只收 commit SHA）。
+# 需要 repository secrets：GCP_DEPLOY_SSH_KEY、GCP_HOST、GCP_KNOWN_HOSTS（由 install-deploy-hook.sh 產生）。
+# 排隊中的部署會被後來排進來的取代（顯示 cancelled）；手動執行（workflow_dispatch）部署 main 最新 commit，不檢查它的 CI。
+# runner 取消或逾時不會中止 VM 上已開始的部署，實際結果以 VM 的 ~/deploy-logs/ 為準。
+
+on:
+  workflow_run:
+    workflows: ["Phase 1–7 checks"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  deploy:
+    # 放在 job 層，希望被 if 跳過的 run 不會把排隊中的部署擠掉（官方文件未明寫，待實測）
+    concurrency:
+      group: deploy-gcp
+      cancel-in-progress: false
+    if: >-
+      github.repository == 'mimimeowmeo/ai-dating-platform' && (
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Deploy over SSH
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.GCP_DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.GCP_HOST }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.GCP_KNOWN_HOSTS }}
+          DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          umask 077
+          missing=""
+          [ -n "$DEPLOY_KEY" ] || missing="$missing GCP_DEPLOY_SSH_KEY"
+          [ -n "$DEPLOY_HOST" ] || missing="$missing GCP_HOST"
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || missing="$missing GCP_KNOWN_HOSTS"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少 repository secrets：$missing"
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit SHA 格式不對"
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_HOST" =~ ^[A-Za-z0-9.:-]+$ ]]; then
+            echo "::error::GCP_HOST 格式不對（只放 IP 或主機名稱）"
+            exit 1
+          fi
+
+          dir="$(mktemp -d "$RUNNER_TEMP/deploy.XXXXXX")"
+          trap 'rm -rf "$dir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" >"$dir/id"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$dir/known_hosts"
+          chmod 600 "$dir/id" "$dir/known_hosts"
+          if ! ssh-keygen -y -P '' -f "$dir/id" >/dev/null 2>&1; then
+            echo "::error::GCP_DEPLOY_SSH_KEY 不是可用的無密碼私鑰"
+            exit 1
+          fi
+          if ! grep -q '^heartlink-gcp ssh-ed25519 ' "$dir/known_hosts"; then
+            echo "::error::GCP_KNOWN_HOSTS 格式不對（請用 install-deploy-hook.sh 的輸出）"
+            exit 1
+          fi
+
+          echo "部署 ${DEPLOY_SHA:0:12}（${EVENT_NAME}）"
+          rc=0
+          ssh -T -i "$dir/id" \
+            -o IdentitiesOnly=yes \
+            -o IdentityAgent=none \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$dir/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o HostKeyAlias=heartlink-gcp \
+            -o HostKeyAlgorithms=ssh-ed25519 \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=6 \
+            "heartlink@$DEPLOY_HOST" "$DEPLOY_SHA" || rc=$?
+          if [ "$rc" -eq 255 ]; then
+            echo "::error::SSH 連不上 VM（exit 255）：VM 可能已停止、臨時 IP 變了要更新 GCP_HOST、防火牆沒開 22 port，或主機金鑰變了要重跑 install-deploy-hook.sh 更新 GCP_KNOWN_HOSTS"
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::部署失敗（exit ${rc}），看上面的 [deploy] 摘要；完整日誌在 VM 的 ~/deploy-logs/"
+          fi
+          exit "$rc"
