@@ -155,7 +155,9 @@ export function card(user: any, viewerId: string) {
 export const userInclude = {
   profile: true,
   preference: true,
+  // 軟刪除的照片留在資料表裡，但所有畫面與 API 都不再出現。
   photos: {
+    where: { deletedAt: null },
     orderBy: [{ displayOrder: "asc" as const }, { createdAt: "asc" as const }],
   },
   traits: {
@@ -359,14 +361,16 @@ export class Profiles {
       const photo = await this.db.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
         const photos = await tx.photo.findMany({ where: { userId: id } });
-        if (photos.length >= 6)
+        // 上限與主照片只算還在的照片；排序號碼看全部，才不會跟軟刪除的舊照片撞號。
+        const active = photos.filter((p) => !p.deletedAt);
+        if (active.length >= 6)
           return fail(400, "PHOTO_LIMIT", "最多可上傳 6 張照片。");
         return tx.photo.create({
           data: {
             userId: id,
             storageKey: key,
             mimeType: "image/jpeg",
-            isAvatar: photos.length === 0,
+            isAvatar: active.length === 0,
             displayOrder:
               Math.max(-1, ...photos.map((p) => p.displayOrder)) + 1,
           },
@@ -378,18 +382,25 @@ export class Profiles {
       throw error;
     }
   }
+  // 刪除照片（含刪掉主照片、改由下一張接替的「替換主照片」）一律是軟刪除：
+  // 只寫 deleted_at 並取消主照片，照片記錄與 MinIO 物件都保留。
+  // 取消 isAvatar 之後，任何用 isAvatar 找主照片的地方都不會拿到已刪除的照片。
   async removePhoto(id: string, photoId: string) {
     uuid(photoId);
-    const photo = await this.db.photo.findFirst({
-      where: { id: photoId, userId: id },
-    });
-    if (!photo) return fail(404, "NOT_FOUND", "找不到照片。");
     await this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
-      await tx.photo.delete({ where: { id: photoId } });
+      // 在鎖裡才查：同一張照片同時刪兩次時，第二次回 404 而不是重複標記。
+      const photo = await tx.photo.findFirst({
+        where: { id: photoId, userId: id, deletedAt: null },
+      });
+      if (!photo) return fail(404, "NOT_FOUND", "找不到照片。");
+      await tx.photo.update({
+        where: { id: photoId },
+        data: { deletedAt: new Date(), isAvatar: false },
+      });
       if (photo.isAvatar) {
         const first = await tx.photo.findFirst({
-          where: { userId: id },
+          where: { userId: id, deletedAt: null },
           orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
         });
         if (first)
@@ -399,7 +410,6 @@ export class Profiles {
           });
       }
     });
-    await this.infra.storage.removeObject(config.S3_BUCKET, photo.storageKey);
     return { ok: true };
   }
   async media(
@@ -420,7 +430,9 @@ export class Profiles {
     if (!matches || expires < Date.now())
       return fail(403, "FORBIDDEN", "照片連結已失效，請重新整理頁面。");
     const photo = await this.db.photo.findUnique({ where: { id: photoId } });
-    if (!photo) return fail(404, "NOT_FOUND", "找不到照片。");
+    // 軟刪除的照片物件還在 MinIO，但舊網址（例如別人頁面的快取）一律當作不存在。
+    if (!photo || photo.deletedAt)
+      return fail(404, "NOT_FOUND", "找不到照片。");
     // 封鎖之後就看不到對方的照片。
     if (
       photo.userId !== viewerId &&

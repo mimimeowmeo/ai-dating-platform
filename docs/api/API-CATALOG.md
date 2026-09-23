@@ -26,7 +26,7 @@ Base path: `/api/v1`
   再檢查各類小熱愛的數量（`TRAITS_REQUIRED`，一次列出所有不足的類別）。
 - `GET /profile/:userId` — 回傳對方的卡片，含 `heightCm`（舊資料沒填時為 `null`）。
 - `POST /profile/photos`
-- `DELETE /profile/photos/:photoId`
+- `DELETE /profile/photos/:photoId` — 軟刪除，照片記錄與 MinIO 物件保留。
 
 ## Preferences
 

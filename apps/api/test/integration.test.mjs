@@ -70,25 +70,29 @@ async function register() {
   accounts.push(user);
   return user;
 }
+const bucket = process.env.S3_BUCKET || "dating-media";
+function storage() {
+  const url = new URL(process.env.S3_ENDPOINT);
+  return new Client({
+    endPoint: url.hostname,
+    port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+    useSSL: url.protocol === "https:",
+    accessKey: process.env.S3_ACCESS_KEY,
+    secretKey: process.env.S3_SECRET_KEY,
+  });
+}
 async function cleanup() {
   const ids = accounts.map((a) => a.id);
+  // 包含軟刪除的照片：測試帳號的物件要全部清掉。
   const photos = await db.photo.findMany({
     where: { userId: { in: ids } },
     select: { storageKey: true },
   });
-  if (photos.length) {
-    const url = new URL(process.env.S3_ENDPOINT);
-    await new Client({
-      endPoint: url.hostname,
-      port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
-      useSSL: url.protocol === "https:",
-      accessKey: process.env.S3_ACCESS_KEY,
-      secretKey: process.env.S3_SECRET_KEY,
-    }).removeObjects(
-      process.env.S3_BUCKET || "dating-media",
+  if (photos.length)
+    await storage().removeObjects(
+      bucket,
       photos.map((p) => p.storageKey),
     );
-  }
   await db.user.deleteMany({ where: { id: { in: ids } } });
   accounts.length = 0;
 }
@@ -588,6 +592,17 @@ test(
       const p1 = await upload();
       const p2 = await upload();
       await request(`/profile/photos/${p1.id}`, { method: "DELETE", user: x });
+      // 軟刪除：記錄與 MinIO 物件都留著，但取消主照片、舊網址回 404、不能再刪第二次。
+      const removed = await db.photo.findUnique({ where: { id: p1.id } });
+      assert.ok(removed?.deletedAt);
+      assert.equal(removed.isAvatar, false);
+      await storage().statObject(bucket, removed.storageKey);
+      assert.equal((await fetch(`${origin}${p1.url}`)).status, 404);
+      await request(`/profile/photos/${p1.id}`, {
+        method: "DELETE",
+        user: x,
+        expected: 404,
+      });
       const p3 = await upload();
       const orders = (await db.photo.findMany({ where: { userId: x.id } })).map(
         (p) => p.displayOrder,
@@ -599,6 +614,34 @@ test(
         [p2.id, p3.id],
       );
       assert.equal(mine[0].isAvatar, true);
+      // 張數上限只算還在的照片：軟刪除的 p1 不佔名額，所以能補到 6 張（資料表共 7 列），第 7 張才被擋。
+      for (let i = 0; i < 4; i++) await upload();
+      assert.equal(await db.photo.count({ where: { userId: x.id } }), 7);
+      const full = await request("/profile/photos", {
+        method: "POST",
+        user: x,
+        body: form(jpeg),
+        expected: 400,
+      });
+      assert.equal(full.value.code, "PHOTO_LIMIT");
+      // 刪光再上傳：新照片要成為主照片（只看還在的照片），整張表只有它一張主照片，
+      // 排序號碼接在所有舊照片（含軟刪除）之後、不撞號。
+      for (const p of (await request("/profile", { user: x })).value.photos)
+        await request(`/profile/photos/${p.id}`, { method: "DELETE", user: x });
+      const fresh = await upload();
+      assert.equal(fresh.isAvatar, true);
+      assert.deepEqual(
+        (await request("/profile", { user: x })).value.photos.map((p) => p.id),
+        [fresh.id],
+      );
+      assert.equal(
+        await db.photo.count({ where: { userId: x.id, isAvatar: true } }),
+        1,
+      );
+      const allOrders = (
+        await db.photo.findMany({ where: { userId: x.id } })
+      ).map((p) => p.displayOrder);
+      assert.equal(new Set(allOrders).size, allOrders.length);
       const tiny = await sharp({
         create: { width: 32, height: 32, channels: 3, background: "#000" },
       })
