@@ -9,8 +9,12 @@
 3. 寫法數值用程式統計；語氣、話題、習慣交給模型，分批萃取（map）後在程式裡合併（reduce）。
 4. 抽象化檢查：特徵句不得與任何原始訊息共用連續 8 個字，也不得含數字、網址、帳號。
 5. 需要時把特徵句向量化，讓後端存進 pgvector 供檢索。
+
+兩者都可以設定 before_model_call：背景 worker 用它讓每次呼叫模型前，先等正在進行的線上推薦
+跑完（見 priority.py）；線上 API 直接呼叫時不設定，不必等。
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -216,6 +220,10 @@ def decide_profile_basis(
     return "none", "none", site.model_copy()
 
 
+# 每次呼叫萃取模型前要先等的事；worker 設成 OnlinePriority.wait_for_idle，讓線上推薦先跑。
+BeforeModelCall = Callable[[], Awaitable[object]]
+
+
 class StyleProfileBuilder:
     """萃取風格卡的服務物件；model 與 embedder 可注入，方便測試。"""
 
@@ -225,6 +233,8 @@ class StyleProfileBuilder:
         self._model = model
         self._model_built = model is not None
         self.embedder = embedder or Embedder(settings)
+        # 每一批（map）呼叫模型前先執行；None 表示不必等（線上 API 直接呼叫時）。
+        self.before_model_call: BeforeModelCall | None = None
         # 萃取模型是 Ollama（本機、自架或 Ollama Cloud）；輸出方式依部署位置決定，見 llm.structured_output。
         self.agent = Agent(
             output_type=structured_output(StyleMapResult, settings.extraction_models, settings),
@@ -242,7 +252,13 @@ class StyleProfileBuilder:
         return self._model
 
     async def _map(self, lines: list[str]):
-        """對一批訊息呼叫萃取模型（map 步驟），回傳 agent 結果。"""
+        """對一批訊息呼叫萃取模型（map 步驟），回傳 agent 結果。
+
+        呼叫前先執行 before_model_call（如果有）：批次之間讓正在進行的線上推薦先用模型。
+        等待的時間不算在這一批的逾時裡。
+        """
+        if self.before_model_call is not None:
+            await self.before_model_call()
         return await run_agent(
             self.agent,
             build_style_map_prompt(lines),
@@ -316,6 +332,8 @@ class ConversationSummarizer:
         self.settings = settings
         self._model = model
         self._model_built = model is not None
+        # 呼叫模型前先執行；None 表示不必等（線上 API 直接呼叫時）。
+        self.before_model_call: BeforeModelCall | None = None
         self.agent = Agent(
             output_type=structured_output(SummaryDraft, settings.extraction_models, settings),
             instructions=SUMMARY_INSTRUCTIONS,
@@ -332,8 +350,13 @@ class ConversationSummarizer:
         return self._model
 
     async def summarize(self, request: SummaryRequest) -> SummaryResponse:
-        """用「舊摘要＋新訊息」產生新摘要；超過字數上限時在上限處截斷。"""
+        """用「舊摘要＋新訊息」產生新摘要；超過字數上限時在上限處截斷。
+
+        呼叫模型前先執行 before_model_call（如果有），讓正在進行的線上推薦先用模型。
+        """
         ordered = sort_messages(request.messages)
+        if self.before_model_call is not None:
+            await self.before_model_call()
         result = await run_agent(
             self.agent,
             build_summary_prompt(request.previousSummary, ordered, request.maxChars),

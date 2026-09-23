@@ -44,6 +44,7 @@ SITE_DEFAULT_STATS = StyleStats(
 HIGH_CONFIDENCE_MESSAGES = 30  # 真人訊息 ≥ 30 則：風格卡以聊天為主（規格 5.3）
 MIN_BIO_CHARS = 10  # bio 少於 10 個字：不足以當寫法樣本
 BURST_GAP = timedelta(seconds=60)  # 同一聊天室 60 秒內的連續訊息算同一次「連發」
+MAX_BURST_MEAN = 50.0  # 平均連發則數的上限，與 StyleStats.burstMean 的欄位上限一致
 PARTICLE_MIN_RATIO = 0.05  # 語助詞出現在 5% 以上的訊息才算習慣
 MAX_PARTICLES = 6
 BIO_PARTICLE_RATIO = 0.3  # 只有 bio 時，bio 裡出現過的語助詞視為三成訊息會用到
@@ -73,6 +74,10 @@ def _burst_mean(messages: Sequence[OwnMessage]) -> float:
 
     同一個聊天室裡、跟上一則相隔 60 秒以內的訊息，視為同一次連發。
     我們只有這個人自己發的訊息（看不到對方何時插話），所以用時間間隔來近似。
+
+    上限 MAX_BURST_MEAN（StyleStats 的欄位上限）：兩個人一來一往聊得很快時，這個人每則都在
+    上一則的 60 秒內，整段聊天會被算成同一次連發；不設上限會超過 50 而驗證失敗，
+    整個風格卡萃取跟著失敗（2026-09-23 實測發現）。
     """
     if not messages:
         return 1.0
@@ -86,7 +91,7 @@ def _burst_mean(messages: Sequence[OwnMessage]) -> float:
         for previous, current in zip(times, times[1:]):
             if current - previous > BURST_GAP:
                 runs += 1
-    return max(1.0, round(len(messages) / runs, 3))
+    return max(1.0, min(MAX_BURST_MEAN, round(len(messages) / runs, 3)))
 
 
 def compute_style_stats(messages: Sequence[OwnMessage]) -> StyleStats:

@@ -89,6 +89,20 @@ class StyleProfileTests(unittest.IsolatedAsyncioTestCase):
             await builder.build(StyleProfileRequest(userId="u-b", messages=human_messages(35)))
         self.assertEqual(caught.exception.code, "EXTRACTION_NOT_CONFIGURED")
 
+    async def test_waits_for_online_requests_before_every_model_call(self):
+        # worker 設定了 before_model_call：每一批（這裡是聊天訊息一批＋自我介紹一批）呼叫模型前都先等。
+        events: list[str] = []
+
+        async def wait():
+            events.append("wait")
+
+        builder = StyleProfileBuilder(SETTINGS, model=json_model(MAP_OUTPUT, captured=events), embedder=FakeEmbedder())
+        builder.before_model_call = wait
+        await builder.build(
+            StyleProfileRequest(userId="u-b", bio="喜歡爬山跟拍照，週末常往山上跑喔", messages=human_messages(40))
+        )
+        self.assertEqual([event == "wait" for event in events], [True, False, True, False])
+
 
 class SummaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_summary_is_converted_truncated_and_versioned(self):
@@ -105,6 +119,19 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((result.untilMessageId, result.promptVersion), (request.messages[0].id, "summary-v1"))
         self.assertIn("（沒有，這是第一次整理）", prompts[0])
         self.assertLess(prompts[0].index("我也是"), prompts[0].index("我喜歡爬山"))  # 依時間排序
+
+    async def test_summary_waits_for_online_requests_before_calling_model(self):
+        events: list[str] = []
+
+        async def wait():
+            events.append("wait")
+
+        summarizer = ConversationSummarizer(SETTINGS, model=json_model({"summary": "兩人聊到爬山"}, captured=events))
+        summarizer.before_model_call = wait
+        await summarizer.summarize(
+            SummaryRequest(conversationId="c-1", messages=[indexed("u-a", "我也喜歡爬山", 1)], maxChars=100)
+        )
+        self.assertEqual([event == "wait" for event in events], [True, False])
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from ..config import Settings
 from .chunking import CHUNK_VERSION, build_chunks, sort_messages
 from .embeddings import Embedder
 from .errors import AIServiceError
-from .extraction import ConversationSummarizer, StyleProfileBuilder
+from .extraction import BeforeModelCall, ConversationSummarizer, StyleProfileBuilder
 from .schemas import (
     ChunkOut,
     ChunkRequest,
@@ -52,6 +52,15 @@ class ReplyAIService:
         self.suggester = suggester or ReplySuggester(settings)
         self.style_builder = style_builder or StyleProfileBuilder(settings, embedder=self.embedder)
         self.summarizer = summarizer or ConversationSummarizer(settings)
+
+    def yield_to_online_requests(self, wait: BeforeModelCall) -> None:
+        """讓背景工作（風格卡萃取、聊天室摘要）每次呼叫模型前，先執行 wait。
+
+        只有 worker 會呼叫，傳入 OnlinePriority.wait_for_idle：萃取模型是同時只處理 1 個請求的
+        Ollama Cloud，背景工作要讓正在等結果的「AI 推薦」先用。線上推薦本身不受影響。
+        """
+        self.style_builder.before_model_call = wait
+        self.summarizer.before_model_call = wait
 
     async def suggestions(self, request: ReplySuggestionRequest) -> ReplySuggestionResponse:
         """產生 3～5 則推薦（詳見 suggest.ReplySuggester.generate）。"""

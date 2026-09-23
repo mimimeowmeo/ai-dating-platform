@@ -4,7 +4,8 @@
 //   1. access() 權限檢查，讀近期訊息、雙方檔案、風格卡、摘要。
 //   2. 把最近幾則訊息送去 /embed 變成查詢向量。
 //   3. 用查詢向量在 pgvector 找出相關的舊對話片段與對方的特徵句。
-//   4. 呼叫 /reply-suggestions 產生 3～5 則推薦。
+//   4. 呼叫 /reply-suggestions 產生 0～5 則推薦；呼叫期間在 Redis 標記「有人在等推薦」，
+//      讓背景 worker 先讓路（ai-priority.ts）。
 //   5. 把請求與「全部」推薦（含被刪掉的候選）寫進資料庫，再回傳前端。
 //
 // 向量化失敗時不讓整件事失敗：少了 RAG 的推薦仍然可用，只是少了舊話題的線索。
@@ -16,7 +17,8 @@ import { Social } from "./social";
 import { AiClient, AiError } from "./ai-client";
 import type { AiStyleFacet, AiSuggestRequest } from "./ai-client";
 import { AiData } from "./ai-data";
-import { AiJobs } from "./ai-jobs";
+import { AiJobs, STYLE_AFTER_SUGGEST_DELAY_MS } from "./ai-jobs";
+import { trackOnlineRequest } from "./ai-priority";
 import { VectorStore } from "./ai-store";
 
 /**
@@ -131,15 +133,22 @@ export class ReplySuggestions {
       ),
     };
     // 沒有風格卡就順手排一次背景萃取（規格 8：需要時發現沒有）；1 小時內只會排一次。
+    // 延後幾分鐘才開始：使用者接下來常會按「換一批」，立刻萃取會跟推薦搶同一個 Ollama。
     for (const [card, id] of [
       [requesterStyle, userId],
       [partnerStyle, conversation.otherUserId],
     ] as const)
-      if (!card) void this.jobs.enqueueStyle(id).catch(() => undefined);
+      if (!card)
+        void this.jobs
+          .enqueueStyle(id, STYLE_AFTER_SUGGEST_DELAY_MS)
+          .catch(() => undefined);
 
     let result;
     try {
-      result = await this.ai.suggest(payload);
+      // 呼叫期間標記「有人在等推薦」，背景 worker 呼叫模型前會先等它（ai-priority.ts）。
+      result = await trackOnlineRequest(this.infra.redis, requestId, () =>
+        this.ai.suggest(payload),
+      );
     } catch (error) {
       if (!(error instanceof AiError)) throw error;
       await this.saveFailure(
