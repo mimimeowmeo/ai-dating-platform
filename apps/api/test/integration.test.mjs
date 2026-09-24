@@ -117,6 +117,46 @@ async function create(name) {
   });
   return user;
 }
+// 走前端現在的即時鏡頭流程：領挑戰 → 送正面＋每個動作各一張影格。
+async function liveVerify(user, frame) {
+  const challenge = (
+    await request("/verification/challenge", {
+      method: "POST",
+      user,
+      expected: 201,
+    })
+  ).value;
+  const data = new FormData();
+  data.append("challengeId", challenge.challengeId);
+  for (let i = 0; i <= challenge.actions.length; i++)
+    data.append(
+      "frames",
+      new Blob([frame], { type: "image/jpeg" }),
+      `frame-${i}.jpg`,
+    );
+  return (
+    await request("/onboarding/live", {
+      method: "POST",
+      user,
+      body: data,
+      expected: 201,
+    })
+  ).value;
+}
+// 測試影格是純色圖，重點是「不會假造驗證通過」，結果依有沒有接上人臉模型而不同：
+// - 沒有模型：unavailable。AI_SERVICE_UNAVAILABLE＝連不上 ai 服務（CI 的 compose 不含它），
+//   MODEL_NOT_CONFIGURED＝ai 服務有回應，但沒設定 provider。
+// - 有模型（本機啟用 services/face）：影格裡沒有臉，rejected / NO_FACE_DETECTED。
+function assertNotVerified(result) {
+  const expected = {
+    unavailable: ["AI_SERVICE_UNAVAILABLE", "MODEL_NOT_CONFIGURED"],
+    rejected: ["NO_FACE_DETECTED"],
+  }[result.status];
+  assert.ok(
+    expected?.includes(result.reasonCode),
+    `未預期的結果：${result.status} / ${result.reasonCode}`,
+  );
+}
 function connected(user) {
   const socket = io(origin, {
     auth: { token: user.token },
@@ -310,30 +350,7 @@ test(
         body: invalid,
         expected: 400,
       });
-      const selfie = new FormData();
-      selfie.append(
-        "file",
-        new Blob([jpeg], { type: "image/jpeg" }),
-        "selfie.jpg",
-      );
-      const verification = (
-        await request("/onboarding/selfie", {
-          method: "POST",
-          user: a,
-          body: selfie,
-          expected: 201,
-        })
-      ).value;
-      assert.equal(verification.status, "unavailable");
-      // 重點是「不會假造驗證通過」；兩種代碼都代表沒有真人辨識模型：
-      // AI_SERVICE_UNAVAILABLE＝連不上 ai 服務（CI 的 compose 不含它），
-      // MODEL_NOT_CONFIGURED＝ai 服務有回應，但沒掛上辨識模型（本機開著 ai 服務時）。
-      assert.ok(
-        ["AI_SERVICE_UNAVAILABLE", "MODEL_NOT_CONFIGURED"].includes(
-          verification.reasonCode,
-        ),
-        `未預期的代碼：${verification.reasonCode}`,
-      );
+      assertNotVerified(await liveVerify(a, jpeg));
       assert.equal(
         (await request("/auth/me", { user: a })).value.isVerified,
         false,
@@ -700,17 +717,13 @@ test(
         expected: 404,
       });
       assert.equal(notFound.value.code, "NOT_FOUND");
+      // 已驗證的人重新驗證：unavailable 不動標記，rejected 會取消標記。
       await db.user.update({ where: { id: x.id }, data: { isVerified: true } });
-      const verification = await request("/onboarding/selfie", {
-        method: "POST",
-        user: x,
-        body: form(jpeg, "selfie.jpg"),
-        expected: 201,
-      });
-      assert.equal(verification.value.status, "unavailable");
+      const verification = await liveVerify(x, jpeg);
+      assertNotVerified(verification);
       assert.equal(
         (await request("/auth/me", { user: x })).value.isVerified,
-        true,
+        verification.status === "unavailable",
       );
 
       await request("/interactions", {

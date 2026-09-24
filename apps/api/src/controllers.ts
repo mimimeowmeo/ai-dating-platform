@@ -142,7 +142,7 @@ export class ProductController {
     // upload 攔截器（multer）解析出來的檔案；沒附檔案時是 undefined，由 verifySelfie 回 400。
     @UploadedFile() file: Express.Multer.File,
   ) {
-    // 交給 Profiles.verifySelfie：檢查大頭貼、限制次數、整理自拍、呼叫 AI 服務、寫入結果。
+    // 交給 Profiles.verifySelfie：檢查大頭貼、整理自拍、呼叫 AI 服務、寫入結果。
     return this.profiles.verifySelfie(r.userId, file);
   }
   /**
@@ -150,7 +150,7 @@ export class ProductController {
    * 還沒上傳大頭貼會回 409 AVATAR_REQUIRED。
    */
   @Post("verification/challenge") challenge(@Req() r: AuthRequest) {
-    // 交給 Profiles.createChallenge：檢查大頭貼、限制次數、抽動作、存進 Redis。
+    // 交給 Profiles.createChallenge：檢查大頭貼、抽動作、存進 Redis。
     return this.profiles.createChallenge(r.userId);
   }
   /**

@@ -33,8 +33,6 @@ const challengeActions = [
 type ChallengeAction = (typeof challengeActions)[number];
 // 一次挑戰要做幾個動作。
 const CHALLENGE_ACTION_COUNT = 2;
-// 每位使用者每小時最多送出幾次真人驗證（上傳自拍與即時鏡頭共用）。
-const VERIFY_PER_HOUR = 5;
 // 挑戰的有效秒數：從領到挑戰到送出影格，超過就要重新開始。
 const CHALLENGE_TTL_SECONDS = 120;
 // AI 服務對每張動作影格的上限（1 MiB），和 services/ai 的 MAX_FRAME_BYTES 相同。
@@ -653,10 +651,11 @@ export class Profiles {
    * unavailable / LIVE_CAPTURE_REQUIRED。要通過驗證請走即時鏡頭（createChallenge + verifyLive）。
    *
    * 流程：
-   * 1. 沒有大頭貼就回 409 AVATAR_REQUIRED；這一步放在次數限制之前，還沒上傳照片的人不會白白用掉次數。
-   * 2. 每位使用者每小時最多驗證 5 次（和即時鏡頭共用），超過回 429。
-   * 3. 檢查並整理自拍：格式、大小、轉正、縮到 1600px、轉成 JPEG（見 image）。
-   * 4. 交給 runVerification 呼叫 AI 服務並記錄結果。
+   * 1. 沒有大頭貼就回 409 AVATAR_REQUIRED。
+   * 2. 檢查並整理自拍：格式、大小、轉正、縮到 1600px、轉成 JPEG（見 image）。
+   * 3. 交給 runVerification 呼叫 AI 服務並記錄結果。
+   *
+   * 不設每小時的驗證次數上限（只受所有 API 共用的每分鐘請求上限約束）。
    */
   async verifySelfie(id: string, file: Express.Multer.File | undefined) {
     // 步驟 1：找出第一張主照片（大頭貼）。
@@ -668,11 +667,9 @@ export class Profiles {
         "AVATAR_REQUIRED",
         "請先上傳至少一張大頭貼，再進行真人驗證。",
       );
-    // 步驟 2：次數限制，同一位使用者每 3600 秒（1 小時）最多 5 次，超過會丟出 429。
-    await this.infra.limit(`verify:${id}`, VERIFY_PER_HOUR, 3600);
-    // 步驟 3：檢查並整理自拍；不合格會直接丟出 400 與中文說明。
+    // 步驟 2：檢查並整理自拍；不合格會直接丟出 400 與中文說明。
     const buffer = await this.image(file);
-    // 步驟 4：只送自拍（沒有 liveCapture），交給共用流程呼叫 AI 服務並記錄結果。
+    // 步驟 3：只送自拍（沒有 liveCapture），交給共用流程呼叫 AI 服務並記錄結果。
     return this.runVerification(id, avatar, {
       // 自拍轉成 base64 文字。
       imageBase64: buffer.toString("base64"),
@@ -687,8 +684,7 @@ export class Profiles {
    *   動作由伺服器決定、每次都不一樣，對著鏡頭播放事先錄好的影片無法剛好照著做。
    *   限制：伺服器無法證明影格是鏡頭當下拍的；繞過前端直接呼叫 API、送出事先準備好的影格（注入攻擊）擋不住。
    * - 挑戰存在 Redis，120 秒後自動失效，而且只能用一次（verifyLive 讀出後立刻刪除）。
-   * - 沒有大頭貼回 409 AVATAR_REQUIRED；每位使用者每小時最多領 10 次，超過回 429。
-   *   這個小時的驗證次數（5 次）已經用完時也先回 429，不讓使用者做完整段鏡頭流程才失敗。
+   * - 沒有大頭貼回 409 AVATAR_REQUIRED。不設每小時的領取次數上限。
    *
    * 回傳 { challengeId, actions, expiresInSeconds }，前端依 actions 的順序引導使用者做動作。
    */
@@ -702,14 +698,6 @@ export class Profiles {
         "AVATAR_REQUIRED",
         "請先上傳至少一張大頭貼，再進行真人驗證。",
       );
-    // 驗證次數（每小時 5 次）已經用完：現在就回 429，不要讓使用者做完整段鏡頭流程才在送出時失敗。
-    // 這裡只讀取計數、不增加，真正扣次數的是 verifyLive。
-    if (
-      Number(await this.infra.redis.get(`rate:verify:${id}`)) >= VERIFY_PER_HOUR
-    )
-      return fail(429, "RATE_LIMIT", "操作太頻繁，請稍後再試。");
-    // 次數限制：同一位使用者每 3600 秒（1 小時）最多 10 次，超過會丟出 429。
-    await this.infra.limit(`challenge:${id}`, 10, 3600);
     // 可以抽的動作（複製一份，抽過的就移除，才不會抽到重複的）。
     const pool = [...challengeActions];
     // 這次挑戰要做的動作，依抽出的順序排列。
@@ -772,12 +760,11 @@ export class Profiles {
    * - frames：依序是「正面影格」＋每個動作各一張（順序和挑戰的 actions 相同）。
    *
    * 流程：
-   * 1. 沒有大頭貼回 409 AVATAR_REQUIRED（在次數限制之前）。
-   * 2. 每位使用者每小時最多驗證 5 次（和上傳自拍共用），超過回 429。
-   * 3. 從 Redis 讀出並立刻刪除挑戰（只能用一次）；不存在、過期或不是自己的，回 409 CHALLENGE_EXPIRED。
-   * 4. 影格數量必須等於「動作數 + 1」，否則回 400 INVALID_FRAMES。
-   * 5. 逐張整理影格（見 frame）。
-   * 6. 交給 runVerification：正面影格當自拍，動作影格放進 liveCapture，由 provider 重新檢查每個動作。
+   * 1. 沒有大頭貼回 409 AVATAR_REQUIRED。
+   * 2. 從 Redis 讀出並立刻刪除挑戰（只能用一次）；不存在、過期或不是自己的，回 409 CHALLENGE_EXPIRED。
+   * 3. 影格數量必須等於「動作數 + 1」，否則回 400 INVALID_FRAMES。
+   * 4. 逐張整理影格（見 frame）。
+   * 5. 交給 runVerification：正面影格當自拍，動作影格放進 liveCapture，由 provider 重新檢查每個動作。
    */
   async verifyLive(
     id: string,
@@ -793,9 +780,7 @@ export class Profiles {
         "AVATAR_REQUIRED",
         "請先上傳至少一張大頭貼，再進行真人驗證。",
       );
-    // 步驟 2：次數限制，和上傳自拍共用同一個計數（每小時 5 次）。
-    await this.infra.limit(`verify:${id}`, VERIFY_PER_HOUR, 3600);
-    // 步驟 3：從表單取出挑戰編號，必須是 UUID 格式。
+    // 步驟 2：從表單取出挑戰編號，必須是 UUID 格式。
     const parsed = z
       // 表單欄位 challengeId 是 UUID 字串。
       .object({ challengeId: z.string().uuid() })
@@ -817,15 +802,15 @@ export class Profiles {
         "CHALLENGE_EXPIRED",
         "驗證已逾時或已使用，請重新開始驗證。",
       );
-    // 步驟 4：影格數量必須是「正面 1 張 + 每個動作 1 張」。
+    // 步驟 3：影格數量必須是「正面 1 張 + 每個動作 1 張」。
     if (!files || files.length !== challenge.actions.length + 1)
       return fail(400, "INVALID_FRAMES", "影格數量不正確，請重新開始驗證。");
-    // 步驟 5：逐張整理影格；第一張是正面，其餘依序對應每個動作。
+    // 步驟 4：逐張整理影格；第一張是正面，其餘依序對應每個動作。
     const [neutral, ...actionFrames] = await Promise.all(
       // 每張都經過 frame 的檢查與縮圖。
       files.map((file) => this.frame(file)),
     );
-    // 步驟 6：交給共用流程呼叫 AI 服務並記錄結果。
+    // 步驟 5：交給共用流程呼叫 AI 服務並記錄結果。
     return this.runVerification(id, avatar, {
       // 正面影格當作「自拍」，用來和大頭貼比對，也當作動作角度的基準。
       imageBase64: neutral.toString("base64"),
@@ -1034,8 +1019,6 @@ export class Profiles {
    * 判斷方式和 GET /verification/status 一致：還沒上傳大頭貼時回 AVATAR_REQUIRED 與 canVerify=false。
    */
   async retry(id: string) {
-    // 同一位使用者每 3600 秒（1 小時）最多 10 次，超過會丟出 429。
-    await this.infra.limit(`retry:${id}`, 10, 3600);
     // 查第一張主照片，判斷現在能不能驗證。
     const avatar = await this.avatarPhoto(id);
     // 沒有大頭貼：請使用者先上傳照片。
