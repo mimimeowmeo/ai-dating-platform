@@ -201,4 +201,30 @@ test("驗證結果依原因代碼顯示說明", async ({ page }, info) => {
     await expect(page.locator(".verification-status")).toContainText(text);
     await page.unroute("**/api/v1/verification/status");
   }
+
+  // 已經有驗證標記、最近一次重新驗證沒完成（unavailable 不會取消標記）：標題照標記顯示，另外說明這次的結果。
+  await page.route("**/api/v1/auth/refresh", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...body, user: { ...body.user, isVerified: true } },
+    });
+  });
+  await page.route("**/api/v1/verification/status", (route) =>
+    route.fulfill({
+      json: {
+        status: "unavailable",
+        reasonCode: "AI_SERVICE_UNAVAILABLE",
+        canVerify: true,
+      },
+    }),
+  );
+  await page.goto("/verification");
+  await expect(
+    page.getByRole("heading", { name: "已通過真人驗證", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(".verification-status")).toContainText(
+    "你的驗證標記仍然有效。最近一次重新驗證沒有完成",
+  );
 });

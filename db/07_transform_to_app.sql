@@ -7,7 +7,8 @@ SELECT hu.id AS old_id, gen_random_uuid() AS new_id, hu.account, hu.password_has
 FROM hl.users hu;
 
 INSERT INTO users (id, email, password_hash, is_verified, created_at, updated_at)
-SELECT new_id, lower(account) || '@heartlink.local', password_hash, true, now(), now()
+-- 匯入的示範帳號沒有做過真人驗證，一律從未驗證開始。
+SELECT new_id, lower(account) || '@heartlink.local', password_hash, false, now(), now()
 FROM _map;
 
 INSERT INTO profiles (
