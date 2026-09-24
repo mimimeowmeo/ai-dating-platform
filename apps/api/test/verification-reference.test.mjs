@@ -114,7 +114,7 @@ function fakeDb({
  * Redis 只實作挑戰會用到的 set 與 getdel。
  * challenge：getdel 要回傳的挑戰內容（物件，會轉成 JSON 字串）；不給代表挑戰不存在或已過期。
  */
-function fakeInfra(getObject, { challenge, verifyCount = null } = {}) {
+function fakeInfra(getObject, { challenge } = {}) {
   // 記下每一次次數限制的 key，測試可以確認有沒有被計算。
   const limits = [];
   // 記下 Redis 的寫入（set）與讀取刪除（getdel）。
@@ -127,8 +127,6 @@ function fakeInfra(getObject, { challenge, verifyCount = null } = {}) {
     // 物件儲存：getObject 由各個測試決定要回傳檔案還是丟錯。
     storage: { getObject },
     redis: {
-      // 讀取驗證次數的計數（rate:verify:<id>）；null 代表這個小時還沒驗證過。
-      get: async () => verifyCount,
       // 寫入：記下所有參數（key、內容、EX、秒數）。
       set: async (...args) => redisCalls.set.push(args),
       // 讀出並刪除：記下 key，回傳指定的挑戰（JSON 字串）或 null。
@@ -383,8 +381,8 @@ test("重新驗證 API：沒有大頭貼回 AVATAR_REQUIRED，有大頭貼回 LI
       canVerify: true,
     },
   );
-  // 兩次呼叫都有計算重新驗證的次數。
-  assert.deepEqual(infra.limits, ["retry:user-1", "retry:user-1"]);
+  // 不設每小時上限：不計算重新驗證的次數。
+  assert.deepEqual(infra.limits, []);
 });
 
 // 四種動作挑戰；必須和 profiles.ts 的 challengeActions 相同。
@@ -433,8 +431,8 @@ test("領挑戰：隨機 2 個不同動作，存進 Redis 並設定 120 秒後�
   assert.ok(result.actions.every((action) => ACTIONS.includes(action)));
   // 有效秒數是 120。
   assert.equal(result.expiresInSeconds, 120);
-  // 計算的是領挑戰的次數。
-  assert.deepEqual(infra.limits, ["challenge:user-1"]);
+  // 不設每小時上限：不計算領挑戰的次數。
+  assert.deepEqual(infra.limits, []);
   // Redis 的寫入：key、內容（誰的挑戰、哪些動作）、EX、120 秒。
   assert.deepEqual(infra.redisCalls.set, [
     [
@@ -471,8 +469,8 @@ test("即時驗證：正面影格當自拍、動作影格依挑戰順序放進 l
   assert.deepEqual(infra.redisCalls.getdel, [
     `verify-challenge:${CHALLENGE_ID}`,
   ]);
-  // 計算的是驗證次數（和上傳自拍共用）。
-  assert.deepEqual(infra.limits, ["verify:user-1"]);
+  // 不設每小時上限：不計算驗證次數。
+  assert.deepEqual(infra.limits, []);
   // 送出一次請求。
   assert.equal(bodies.length, 1);
   // 動作影格的動作與挑戰順序相同。
@@ -700,22 +698,6 @@ test("狀態 API：通過驗證後換了大頭貼（isVerified 已取消），�
     ).status,
     "verified",
   );
-});
-
-test("領挑戰：驗證次數已用完就先回 429，不扣領挑戰的次數", async () => {
-  // 這個小時已經驗證 5 次。
-  const infra = fakeInfra(async () => assert.fail("不該讀物件儲存"), {
-    verifyCount: "5",
-  });
-  // 應該回 429 RATE_LIMIT。
-  await rejectsWith(
-    new Profiles(fakeDb({ avatar }), infra).createChallenge("user-1"),
-    429,
-    "RATE_LIMIT",
-  );
-  // 沒有扣次數，也沒有寫入挑戰。
-  assert.deepEqual(infra.limits, []);
-  assert.deepEqual(infra.redisCalls.set, []);
 });
 
 test("刪掉大頭貼（軟刪除）會取消驗證標記；刪其他照片不會", async () => {

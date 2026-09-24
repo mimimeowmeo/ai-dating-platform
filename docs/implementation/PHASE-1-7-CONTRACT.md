@@ -34,8 +34,8 @@
 ## 真人驗證
 
 - 前端的真人驗證用即時鏡頭：
-  - `POST /verification/challenge` → `{challengeId,actions,expiresInSeconds}`：從 `turn_left | turn_right | look_up | look_down` 隨機抽 2 個不同動作，存在 Redis（`verify-challenge:<id>`，120 秒失效、只能用一次）。沒有照片回 `409 AVATAR_REQUIRED`；每人每小時 10 次，這個小時的驗證次數（5 次）已用完時也先回 `429 RATE_LIMIT`。方向以使用者自己為準（`turn_left`＝往自己的左邊轉頭）。
-  - `POST /onboarding/live` multipart：`challengeId` ＋ `frames`（依序是正面影格、每個動作各一張，數量＝動作數＋1，最多 4 張、每張 8 MB）→ Verification。挑戰用 `GETDEL` 讀出即刪；不存在、過期或不是自己的回 `409 CHALLENGE_EXPIRED`，缺編號回 `400 CHALLENGE_REQUIRED`，張數不對回 `400 INVALID_FRAMES`。影格縮到 1024px、1 MiB 內，和上傳自拍共用每小時 5 次的驗證次數。
+  - `POST /verification/challenge` → `{challengeId,actions,expiresInSeconds}`：從 `turn_left | turn_right | look_up | look_down` 隨機抽 2 個不同動作，存在 Redis（`verify-challenge:<id>`，120 秒失效、只能用一次）。沒有照片回 `409 AVATAR_REQUIRED`；不設每小時次數上限。方向以使用者自己為準（`turn_left`＝往自己的左邊轉頭）。
+  - `POST /onboarding/live` multipart：`challengeId` ＋ `frames`（依序是正面影格、每個動作各一張，數量＝動作數＋1，最多 4 張、每張 8 MB）→ Verification。挑戰用 `GETDEL` 讀出即刪；不存在、過期或不是自己的回 `409 CHALLENGE_EXPIRED`，缺編號回 `400 CHALLENGE_REQUIRED`，張數不對回 `400 INVALID_FRAMES`。影格縮到 1024px、1 MiB 內，不設每小時次數上限。
 - `POST /onboarding/selfie` multipart `file` → Verification（舊流程，前端已改用即時鏡頭）。還沒上傳任何照片時回 `409 AVATAR_REQUIRED`（在次數限制之前檢查，不建立紀錄、不呼叫 AI）。
 - `GET /verification/status` → Verification；`POST /verification/retry` → Verification（retry 不寫資料庫，有大頭貼回 `LIVE_CAPTURE_REQUIRED`，表示要走即時鏡頭；沒有回 `AVATAR_REQUIRED`）。
 - Verification：`{id?,status,reasonCode?,modelName?,modelVersion?,createdAt?,canVerify}`；狀態 `not_started | pending | verified | rejected | unavailable`。`canVerify` 在使用者已上傳第一張照片（大頭貼）時為 `true`，前端依它決定是否顯示真人驗證區塊；從沒驗證過且沒有照片時 `reasonCode` 為 `AVATAR_REQUIRED`；通過驗證後刪掉（換掉）大頭貼時回 `not_started / AVATAR_CHANGED`。不回傳活體與比對分數。
