@@ -2095,6 +2095,7 @@ function VerificationPage() {
   const q = useData<VerificationState>("/verification/status");
   const profile = useData<Profile | null>("/profile");
   const client = useQueryClient();
+  const user = useAuth((s) => s.user);
   const labels: Record<string, string> = {
     not_started: "尚未驗證",
     pending: "驗證處理中",
@@ -2105,7 +2106,14 @@ function VerificationPage() {
   // 和後端挑選比對對象的規則一致：主照片優先，其次是排在最前面的照片。
   const photos = profile.data?.photos ?? [];
   const avatar = photos.find((p) => p.isAvatar) ?? photos[0];
-  const message = verificationMessage(q.data);
+  // 標題看目前的驗證標記；最近一次重新驗證沒完成（unavailable 不會取消標記）時，另外說明標記仍有效。
+  const verified = !!user?.isVerified;
+  const status = q.data?.status || "not_started";
+  const result = verificationMessage(q.data);
+  const message =
+    verified && status !== "verified" && result
+      ? `你的驗證標記仍然有效。最近一次重新驗證沒有完成：${result}`
+      : result;
   return (
     <>
       <Heading
@@ -2119,11 +2127,9 @@ function VerificationPage() {
             <ShieldCheck size={34} />
           </div>
           <span className="eyebrow">YOUR VERIFICATION</span>
-          <h2>{labels[q.data?.status || "not_started"]}</h2>
+          <h2>{verified ? "已通過真人驗證" : labels[status]}</h2>
           {message && (
-            <p className={q.data?.status === "verified" ? "success" : "muted"}>
-              {message}
-            </p>
+            <p className={verified ? "success" : "muted"}>{message}</p>
           )}
         </div>
         <div className="divider" />
