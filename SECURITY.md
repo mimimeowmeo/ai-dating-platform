@@ -9,10 +9,10 @@
 - Refresh cookie 為 HttpOnly、SameSite=Lax；本機 HTTP 允許非 Secure，正式 HTTPS 必須設定 COOKIE_SECURE=true 與正確 WEB_ORIGIN。
 - API 驗證輸入白名單、使用 Prisma 參數化 SQL、對認證／訊息／上傳設 rate limit。
 - 私人資料只限本人；聊天室僅限有效配對成員，雙向封鎖與取消配對立即限制後續操作。
-- 影像用 Sharp／Pillow 實際解碼並限制尺寸，公開照片重新編碼以移除 EXIF；MinIO bucket 不公開，透過照片 id 代理讀取。
+- 影像用 Sharp／Pillow 實際解碼並限制尺寸，公開照片重新編碼以移除 EXIF；物件儲存的 bucket 不公開，透過照片 id 代理讀取。
 - 公開照片 URL 屬可分享資源，知悉 URL 的人可以讀取；封鎖不撤銷已保存的照片或 URL。
 - 不得提交 .env、密碼、影像或生物特徵；錯誤回應不得包含資料庫連線、stack trace。
-- 所有 Docker 主機埠限 127.0.0.1；MinIO 管理帳密僅限本機。
+- 所有 Docker 主機埠限 127.0.0.1；物件儲存（SeaweedFS）的 S3 與管理介面只綁本機，管理介面預設不用登入。
 
 正式上線缺口：TLS、金鑰輪替、密碼重設／電子郵件驗證、內容審核與檢舉處理、部署與備份、外部驗證供應商審查、多實例支援及專業安全測試。
 

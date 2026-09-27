@@ -1,7 +1,7 @@
 # 內部測試用的輕量版：砍掉 ai / ai-worker（未接真模型，測試用不到），只跑 6 個服務。
 # 啟動：docker compose -f docker-compose.test.yml up -d --build --wait
 # 停止：docker compose -f docker-compose.test.yml down
-# 注意：用 -f 指定本檔時，compose 不會自動疊加 docker-compose.override.yml，所以這裡自包含 heartlink-pg / heartlink-minio。
+# 注意：用 -f 指定本檔時，compose 不會自動疊加 docker-compose.override.yml，所以這裡自包含 heartlink-pg / heartlink-s3。
 # 完整版（含 AI）仍用原本的：docker compose up -d
 
 services:
@@ -35,20 +35,24 @@ services:
       timeout: 5s
       retries: 15
 
-  heartlink-minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    container_name: heartlink-minio
+  # 物件儲存（圖床）：SeaweedFS，取代已撤下公開映像的 MinIO（見 docs/architecture/adr/0001-local-mvp-boundaries.md）。
+  # 資料在 external volume heartlink-s3-data（1 萬張示範圖＋使用者上傳的照片）；新機器要先 docker volume create 再還原照片。
+  heartlink-s3:
+    image: chrislusf/seaweedfs:4.47
+    container_name: heartlink-s3
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    command: ["mini", "-dir=/data"]
     environment:
-      MINIO_ROOT_USER: heartlink
-      MINIO_ROOT_PASSWORD: heartlink123
-    ports: ["9002:9000", "9003:9001"]
+      AWS_ACCESS_KEY_ID: heartlink
+      AWS_SECRET_ACCESS_KEY: heartlink123
+    # 主機端沿用 MinIO 時代的 9002（S3）與 9003（管理介面），.env 的 S3_ENDPOINT 不用改。
+    # 只綁 127.0.0.1：SeaweedFS 的管理介面預設不用登入。
+    ports: ["127.0.0.1:9002:8333", "127.0.0.1:9003:23646"]
     volumes:
-      - heartlink_minio_data:/data
+      - heartlink_s3_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
       timeout: 5s
       retries: 15
 
@@ -60,7 +64,7 @@ services:
       PORT: 3001
       DATABASE_URL: postgresql://heartlink:heartlink@heartlink-pg:5432/dating?schema=public
       REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://heartlink-minio:9000
+      S3_ENDPOINT: http://heartlink-s3:8333
       S3_ACCESS_KEY: heartlink
       S3_SECRET_KEY: heartlink123
       S3_BUCKET: heartlink-media
@@ -79,7 +83,7 @@ services:
     depends_on:
       redis: { condition: service_healthy }
       heartlink-pg: { condition: service_healthy }
-      heartlink-minio: { condition: service_healthy }
+      heartlink-s3: { condition: service_healthy }
     healthcheck:
       test:
         [
@@ -137,10 +141,11 @@ services:
 
 volumes:
   redis_data:
-  # 沿用既有的 heartlink 資料卷（含現有測試資料與 CelebA 圖），external=不新建、直接接上舊資料。
+  # 沿用既有的 heartlink 資料卷（含現有測試資料與 CelebA 圖），external=不新建、直接接上舊資料，
+  # 也不會被 down -v 刪掉。
   heartlink_pg_data:
     external: true
     name: heartlink-sandbox_heartlink_pg_data
-  heartlink_minio_data:
+  heartlink_s3_data:
     external: true
-    name: heartlink-sandbox_heartlink_minio_data
+    name: heartlink-s3-data

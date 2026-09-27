@@ -19,7 +19,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-  # 📘 舊的 minio(dating-media)已移除；圖床改用 heartlink-minio(定義在 docker-compose.override.yml，bucket heartlink-media)。
+  # 📘 舊的 minio(dating-media)已移除；圖床是 heartlink-s3（SeaweedFS，定義在 docker-compose.override.yml，bucket heartlink-media）。
   # AI 服務：2026-09-23 為了「AI 推薦回覆」重新加回來（docs/ai/REPLY-SUGGESTIONS-SPEC.md）。
   # ai 提供同步的 /internal/ai/* 給 NestJS 呼叫；ai-worker 消費 ai-jobs、把結果放進 ai-results。
   # 真人驗證預設沒有接上辨識模型，POST /onboarding/selfie 會回 unavailable / MODEL_NOT_CONFIGURED；
@@ -83,7 +83,7 @@ services:
       PORT: 3001
       DATABASE_URL: ${DOCKER_DATABASE_URL:?請執行 pnpm setup}
       REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://heartlink-minio:9000
+      S3_ENDPOINT: http://heartlink-s3:8333
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET:-heartlink-media}

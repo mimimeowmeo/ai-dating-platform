@@ -21,7 +21,7 @@
     "db:migrate": "node scripts/with-env.mjs pnpm --filter @dating/api prisma:migrate",
     "db:seed": "node scripts/with-env.mjs pnpm --filter @dating/api prisma:seed",
     "db:admin": "docker compose --profile tools up -d adminer",
-    "infra:up": "docker compose up -d --wait postgres redis minio",
+    "infra:up": "docker compose up -d --wait heartlink-pg heartlink-s3 redis",
     "docker:up": "docker compose up -d --build --wait",
     "docker:down": "docker compose down",
     "docker:status": "docker compose ps",
