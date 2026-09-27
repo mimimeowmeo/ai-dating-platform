@@ -14,6 +14,9 @@ FastAPI application. Stateless AI compute: synchronous inference endpoints (repl
 ### AI Worker
 Python worker. Consumes asynchronous AI jobs from the `ai-jobs` queue and publishes results to the `ai-results` queue. It never writes to PostgreSQL directly.
 
+### Recommendation Worker
+Python worker (`services/recommendation`, compose profile `recommendation`). Consumes `rec-jobs` (an avatar photo, the same JPEG that is in object storage), turns it into a 512-d appearance vector (YuNet face detection → MediaPipe segmentation, face only → CLIP ViT-B/32) and publishes it to `rec-results`. Separate queues from `ai-jobs`, holds no database credentials, and removes the photo from Redis as soon as it picks up a job. NestJS only enqueues while the worker's `rec-worker:online` heartbeat key exists, and re-queues avatars without a vector every minute.
+
 ### Ollama
 Ollama Cloud (managed, `gemma4:31b`) is the primary model for reply suggestions and is used by the AI service/worker for background extraction (conversation summaries, style profiles); it needs `OLLAMA_API_KEY`. Gemini provides all embeddings (`gemini-embedding-2`) and is the reply fallback (`gemini-3.8-flash`). Every model in a fallback chain has its own timeout. A local Ollama (native macOS app; Docker on macOS has no GPU access) is optional for offline development. Decided after the 2026-09-23 benchmark in the reply suggestions spec (section 14).
 
@@ -45,6 +48,14 @@ Browser -> Nginx -> Socket.IO / NestJS -> Redis / PostgreSQL
 ```text
 NestJS -> BullMQ (ai-jobs) -> AI Worker -> BullMQ (ai-results) -> NestJS -> PostgreSQL
 ```
+
+### Async Appearance Vectors
+```text
+NestJS (avatar upload / promotion / every-minute backfill) -> BullMQ (rec-jobs) -> Recommendation Worker
+  -> BullMQ (rec-results) -> NestJS (remove glasses direction) -> PostgreSQL (appearance_embeddings)
+```
+`GET /discovery` then ranks candidates in NestJS: pgvector for appearance similarity, SQL for interest overlap
+([API catalog](../api/API-CATALOG.md)).
 
 ### Sync Verification
 ```text

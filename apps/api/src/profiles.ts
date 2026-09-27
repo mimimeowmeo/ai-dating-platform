@@ -18,6 +18,7 @@ import {
   catalogs,
   uuid,
 } from "./core";
+import { RecJobs } from "./rec-jobs";
 const gender = z.enum(["woman", "man", "nonbinary"]);
 // 送給 AI 服務的身分參照影像：base64 編碼的 JPEG（使用者的第一張主照片，縮圖後）。
 type ReferenceImage = { imageBase64: string; mimeType: "image/jpeg" };
@@ -234,7 +235,17 @@ export class Profiles {
   constructor(
     private db: Database,
     private infra: Infrastructure,
+    private rec: RecJobs,
   ) {}
+  /** 新的主照片排去算外貌向量（探索頁的外貌分數用）；失敗只記錄，不影響上傳或刪照片。 */
+  private embedAppearance(
+    photo: { id: string; storageKey: string },
+    image?: Buffer,
+  ) {
+    this.rec
+      .enqueueAppearance(photo, image)
+      .catch(() => console.error("rec_enqueue_failed"));
+  }
   async mine(id: string) {
     const user = await this.db.user.findUniqueOrThrow({
       where: { id },
@@ -440,6 +451,7 @@ export class Profiles {
           },
         });
       });
+      if (photo.isAvatar) this.embedAppearance(photo, buffer);
       return photoView(photo, id);
     } catch (error) {
       await this.infra.storage.removeObject(config.S3_BUCKET, key);
@@ -451,7 +463,7 @@ export class Profiles {
   // 取消 isAvatar 之後，任何用 isAvatar 找主照片的地方都不會拿到已刪除的照片。
   async removePhoto(id: string, photoId: string) {
     uuid(photoId);
-    await this.db.$transaction(async (tx) => {
+    const promoted = await this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${id}))`;
       // 在鎖裡才查：同一張照片同時刪兩次時，第二次回 404 而不是重複標記。
       const photo = await tx.photo.findFirst({
@@ -462,6 +474,8 @@ export class Profiles {
         where: { id: photoId },
         data: { deletedAt: new Date(), isAvatar: false },
       });
+      // 照片是軟刪除，外貌向量不留：同一個交易裡硬刪。
+      await tx.appearanceEmbedding.deleteMany({ where: { photoId } });
       if (photo.isAvatar) {
         // 真人驗證比對的是這張大頭貼；換掉之後驗證標記就不再成立，要重新驗證。
         await tx.user.update({ where: { id }, data: { isVerified: false } });
@@ -469,13 +483,17 @@ export class Profiles {
           where: { userId: id, deletedAt: null },
           orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }],
         });
-        if (first)
+        if (first) {
           await tx.photo.update({
             where: { id: first.id },
             data: { isAvatar: true },
           });
+          return first;
+        }
       }
+      return null;
     });
+    if (promoted) this.embedAppearance(promoted);
     return { ok: true };
   }
   async media(

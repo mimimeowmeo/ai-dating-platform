@@ -37,6 +37,7 @@ model User {
   styleProfiles UserStyleProfile[]
   styleFacets UserStyleFacet[]
   suggestionRequests AiSuggestionRequest[]
+  appearanceEmbeddings AppearanceEmbedding[]
   @@map("users")
 }
 
@@ -122,8 +123,36 @@ model Photo {
   createdAt DateTime @default(now()) @map("created_at")
   // 軟刪除：刪除或替換主照片時只標記時間，記錄與 MinIO 物件都保留；有值的照片不會出現在任何 API 回應。
   deletedAt DateTime? @map("deleted_at")
+  appearanceEmbedding AppearanceEmbedding?
   @@index([userId])
   @@map("user_photos")
+}
+
+// 外貌推薦用的照片向量：精確去背只留臉 + CLIP ViT-B/32（512 維），再扣掉「戴眼鏡」方向。
+// 新的主照片由推薦 worker 算（rec-jobs.ts）；種子帳號由 ml/ 的實驗腳本離線算好，prisma/import-appearance.ts 匯入。
+// 向量欄位 Prisma Client 讀寫不了，一律走 VectorStore。
+model AppearanceEmbedding {
+  photoId String @id @map("photo_id") @db.Uuid
+  photo Photo @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  userId String @map("user_id") @db.Uuid
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelVersion String @map("model_version")
+  // 找不到臉時是 NULL：表示處理過了，定期補排不會再送。
+  embedding Unsupported("vector(512)")?
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId])
+  @@map("appearance_embeddings")
+}
+
+// 外貌向量要扣掉的方向，目前只有 glasses（「戴眼鏡 − 沒戴眼鏡」的平均向量差）。
+// 用種子資料的 CelebA 標註算出來，不進版控，由 prisma/import-appearance.ts 匯入；
+// worker 算好的新向量寫回時，NestJS 用同 model_version 的方向扣掉（見 rec-jobs.ts）。
+model AppearanceDirection {
+  name String @id
+  modelVersion String @map("model_version")
+  direction Unsupported("vector(512)")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@map("appearance_directions")
 }
 
 model Verification {

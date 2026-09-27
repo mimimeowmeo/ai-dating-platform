@@ -1,0 +1,4 @@
+# 用 pip install --no-deps 安裝（見 Dockerfile），做法和 services/face 相同：
+# MediaPipe 宣告相依 opencv-contrib-python，會和 requirements.txt 的 opencv-python-headless 搶同一個 cv2；
+# 它宣告的 sounddevice 只有音訊功能用到。真正需要的相依套件已鎖在 requirements.txt。
+mediapipe==1.0.1

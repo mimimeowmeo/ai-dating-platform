@@ -137,8 +137,8 @@ export function classifyOrigin(score: number): Origin {
  * 為了少一個相依套件才自己寫；順便擋掉維度不對或含 NaN／Infinity 的向量，
  * 免得把壞資料寫進資料庫（pgvector 不接受 NaN，錯誤訊息也不好讀）。
  */
-export function toVector(values: number[]) {
-  if (values.length !== EMBEDDING_DIMENSIONS)
+export function toVector(values: number[], dimensions = EMBEDDING_DIMENSIONS) {
+  if (values.length !== dimensions)
     throw new Error(`EMBEDDING_DIMENSION_MISMATCH:${values.length}`);
   for (const value of values)
     if (!Number.isFinite(value)) throw new Error("EMBEDDING_NOT_FINITE");

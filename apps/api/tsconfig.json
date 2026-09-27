@@ -12,5 +12,5 @@
     "outDir": "dist",
     "sourceMap": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "prisma/seed.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "prisma/*.ts"]
 }
