@@ -6,7 +6,13 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 require("ts-node/register/transpile-only");
-const { similarity, classifyOrigin, toVector, singleLine } = require("../src/ai-text.ts");
+const {
+  similarity,
+  classifyOrigin,
+  toVector,
+  singleLine,
+  styleCardIsStale,
+} = require("../src/ai-text.ts");
 
 test("相似度：與 Python difflib 的結果一致", () => {
   // 這些數字是拿同一組句子在 services/ai 的 textutil.text_similarity 跑出來的。
@@ -48,4 +54,12 @@ test("向量字面值：維度或數值不對就丟錯，不讓壞資料進資�
   const broken = [...vector];
   broken[10] = Number.NaN;
   assert.throws(() => toVector(broken), /EMBEDDING_NOT_FINITE/);
+});
+
+test("風格卡要不要更新：超過 24 小時、而且又多了 20 則真人訊息才重新萃取", () => {
+  const created = new Date("2026-09-27T00:00:00Z");
+  const hours = (count) => new Date(created.getTime() + count * 60 * 60 * 1000);
+  assert.equal(styleCardIsStale(created, 50, hours(23)), false); // 還不到一天
+  assert.equal(styleCardIsStale(created, 19, hours(25)), false); // 新訊息不夠多
+  assert.equal(styleCardIsStale(created, 20, hours(24)), true);
 });

@@ -7,7 +7,7 @@
     .venv/bin/python -m tests.live_reply_smoke
 有 Ollama 設定時：測風格卡萃取、聊天室摘要，以及只用萃取模型產生推薦。
 有 GEMINI_API_KEY 時：再用預設的備援鏈（AI_REPLY_MODELS）產生推薦，並測 Gemini 向量化。
-產生推薦時會跑三種情境（見 run_suggestions）：聊天室已經有訊息、聊天室的第一則訊息、完全沒有資料根據。
+產生推薦時會跑五種情境（見 run_suggestions）：回覆、開場、追問、重啟，以及完全沒有資料根據。
 """
 
 import asyncio
@@ -50,7 +50,11 @@ async def check_ollama(settings: Settings):
     """用 Ollama 跑風格卡萃取與聊天室摘要，並用 Ollama 產生一次推薦（不需要 Gemini）。"""
     section(f"Ollama 風格卡萃取（{settings.extraction_models[0]}）")
     builder = StyleProfileBuilder(settings, embedder=Embedder(replace(settings, gemini_api_key="")))
-    messages = [own(text, index * 3, in_ai_topic=index in (5, 6)) for index, text in enumerate(PARTNER_LINES)]
+    # 前一半放在 10 天前、後一半是最近：萃取會切成兩批，特徵句的 lastSeenAt 分得出新舊。
+    messages = [
+        own(text, index * 3 - (60 * 24 * 10 if index < len(PARTNER_LINES) // 2 else 0), in_ai_topic=index in (5, 6))
+        for index, text in enumerate(PARTNER_LINES)
+    ]
     started = time.perf_counter()
     result = await builder.build(StyleProfileRequest(userId="u-b", bio="喜歡爬山跟拍照，週末常往山上跑喔", messages=messages))
     card = result.card
@@ -58,7 +62,7 @@ async def check_ollama(settings: Settings):
     print("寫法統計：", card.stats.model_dump(exclude={"messageCount"}))
     print("語氣：", card.voiceNotes)
     for facet in card.facets:
-        print(f"  [{facet.kind}] {facet.statement}（權重 {facet.weight}）")
+        print(f"  [{facet.kind}] {facet.statement}（權重 {facet.weight}，最後出現 {facet.lastSeenAt}）")
     print("被抽象化檢查刪掉的特徵句數：", result.rejectedStatements)
 
     section("Ollama 聊天室摘要")
@@ -86,11 +90,14 @@ async def check_ollama(settings: Settings):
 
 
 async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
-    """用三種情境各產生一次推薦並印出結果，確認真的模型照規則走。
+    """用五種情境各產生一次推薦並印出結果，確認真的模型照規則走（2026-09-27 的新版規則）。
 
-    1. 聊天室已經有訊息（B 剛問了「你週末都在幹嘛？」）：整批 A 80%／B 20%，標 blend。
-    2. 聊天室還沒有任何訊息（要寫整個聊天室的第一則）：整批照 B 喜歡的樣子寫，標 partner。
-    3. 完全沒有資料根據（沒有訊息、沒有共同標籤、雙方只有暱稱與城市）：
+    1. 回覆（B 剛問了「你週末都在幹嘛？」）：整批 A 80%／B 20%，標 blend，回答類排第 1。
+    2. 開場（聊天室還沒有任何訊息）：整批照 B 喜歡的樣子寫，標 partner；用問句引導 B 分享，
+       話題看 B 最近在聊的話題。
+    3. 追問（A 問了問題、B 還沒回）：只用 A 的語氣；同時有「換個說法重問」（reask）與新話題。
+    4. 重啟（最後一則超過 12 小時）：用開場的做法，整批照 B 喜歡的樣子寫。
+    5. 完全沒有資料根據（沒有訊息、沒有共同標籤、雙方只有暱稱與城市）：
        不呼叫模型，直接回「沒有可推薦的句子」。
     """
     requester = profile("阿明", bio="平常喜歡打羽球跟煮飯，最近想開始爬山", interests=["羽球", "料理"])
@@ -100,19 +107,26 @@ async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
         chat("B", "對啊我超愛！", 1),
         chat("B", "你週末都在幹嘛？", 1.5),
     ]
+    asked = [chat("B", "嗨嗨，很高興配對到你", 0), chat("A", "妳週末通常都在做什麼？", 1)]
     rich = dict(requester=requester, partner=partner, sharedTags=["戶外活動"], partnerStyle=partner_card)
     scenarios = [
-        ("聊天室已經有訊息（預期 A 80%／B 20%）", dict(rich, recentMessages=conversation)),
-        ("聊天室的第一則訊息（預期整批 B 100%）", dict(rich, recentMessages=[])),
-        ("完全沒有資料根據（預期不呼叫模型）", dict(requester=profile("阿明", city="台北"), partner=profile("小美", city="台北"))),
+        ("回覆：B 剛問了問題（預期 A 80%／B 20%，回答類第 1）", dict(rich, recentMessages=conversation), at(5)),
+        ("開場：聊天室還沒有訊息（預期整批 B 100%、用問句）", dict(rich, recentMessages=[]), at(5)),
+        ("追問：A 的問題 B 還沒回（預期只用 A 的語氣，有 reask 也有新話題）", dict(rich, recentMessages=asked), at(5)),
+        ("重啟：超過 12 小時沒人說話（預期整批 B 100%、用開場做法）", dict(rich, recentMessages=conversation), at(60 * 13)),
+        (
+            "完全沒有資料根據（預期不呼叫模型）",
+            dict(requester=profile("阿明", city="台北"), partner=profile("小美", city="台北")),
+            at(5),
+        ),
     ]
-    for title, values in scenarios:
+    for title, values, now in scenarios:
         print(f"--- {title}", flush=True)
-        request = ReplySuggestionRequest(requestId="live-smoke", now=at(5), **values)
+        request = ReplySuggestionRequest(requestId="live-smoke", now=now, **values)
         started = time.perf_counter()
         result = await suggester.generate(request)
         print(f"耗時 {time.perf_counter() - started:.1f} 秒｜模型 {result.modelName}｜狀態 {result.status}｜模式 {result.mode}")
-        print(f"寫法規則 {result.target.rule}／{result.target.source}（目標每則約 {round(result.target.stats.medianChars)} 字）")
+        print(f"寫法規則 {result.target.rule}／{result.target.source}")
         print(f"token：輸入 {result.usage.inputTokens}、輸出 {result.usage.outputTokens}、請求 {result.usage.requests} 次")
         for item in result.suggestions:
             print(f"  {item.rank}. [{item.styleTarget}/{item.intent}] {item.text}（風格距離 {item.styleDistance}）")

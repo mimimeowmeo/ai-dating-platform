@@ -364,7 +364,7 @@ model UserStyleProfile {
   userId String @map("user_id") @db.Uuid
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   version Int
-  /// 風格卡格式版本（style-card-v1）。
+  /// 風格卡格式版本（例如 style-card-v2）。
   featureVersion String @map("feature_version")
   /// high（≥30 則真人訊息）／low／none。
   confidence String
@@ -388,7 +388,8 @@ model UserStyleProfile {
 }
 
 /// 風格卡上的一條抽象特徵句（例如「聊到登山會比較熱絡」）與它的向量。
-/// 產生推薦時用查詢向量找出「跟目前話題最相關」的幾條放進 prompt。
+/// 回覆時用查詢向量找出「跟目前話題最相關」的幾條放進 prompt；
+/// 開場、追問、重啟則依 lastSeenAt 越近越優先（2026-09-27）。
 model UserStyleFacet {
   id String @id @default(uuid()) @db.Uuid
   userId String @map("user_id") @db.Uuid
@@ -401,6 +402,8 @@ model UserStyleFacet {
   weight Float @default(0.5)
   /// 有幾批訊息支持這條特徵。
   evidence Int @default(0)
+  /// 這條特徵最後一次出現的時間（萃取批次裡最新那批的最後一則訊息）；只來自自我介紹或舊版卡片時為空。
+  lastSeenAt DateTime? @map("last_seen_at")
   embedding Unsupported("vector(768)")?
   createdAt DateTime @default(now()) @map("created_at")
   @@index([userId, profileVersion])

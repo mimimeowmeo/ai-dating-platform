@@ -5,9 +5,15 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 
 from app.reply.errors import AIServiceError
-from app.reply.schemas import ReplySuggestionRequest, StyleCard, StyleStats
+from app.reply.schemas import ReplySuggestionRequest, RetrievedChunk, StyleCard, StyleFacet, StyleStats
 from app.reply.style import SITE_DEFAULT_STATS, usable_card
-from app.reply.suggest import ReplySuggester, detect_mode, has_topic_basis, partner_asked_question
+from app.reply.suggest import (
+    ReplySuggester,
+    detect_mode,
+    has_topic_basis,
+    last_requester_question,
+    partner_asked_question,
+)
 from tests.reply_helpers import SETTINGS, at, chat, json_model, profile
 
 
@@ -15,16 +21,36 @@ def draft(text, intent="question", priority=2, reason="依據"):
     return {"text": text, "intent": intent, "priority": priority, "reason": reason}
 
 
-def card(median, particles=None, emoji=0.0) -> StyleCard:
+def card(median, particles=None, emoji=0.0, messages=50, facets=None) -> StyleCard:
     return StyleCard(
-        confidence="high",
-        sampleSource="chat",
-        messageCount=50,
+        confidence="high" if messages >= 30 else "low",
+        sampleSource="chat" if messages >= 30 else "mixed",
+        messageCount=messages,
         stats=StyleStats(
-            messageCount=50, medianChars=median, meanChars=median, emojiPerMessage=emoji, questionRatio=0.2,
+            messageCount=messages, medianChars=median, meanChars=median, emojiPerMessage=emoji, questionRatio=0.2,
             exclamationRatio=0.0, laughterRatio=0.3 if emoji else 0.0, particles=particles or {},
         ),
+        facets=facets or [],
     )
+
+
+def facet(kind, statement, weight=0.5, minutes=None) -> StyleFacet:
+    return StyleFacet(kind=kind, statement=statement, weight=weight, lastSeenAt=at(minutes) if minutes is not None else None)
+
+
+# B 在所有聊天室的特徵句：登山權重最高但比較舊，咖啡權重低但最近才聊（10 天後）。
+PARTNER_FACETS = [
+    facet("topic", "聊到「登山」會比較熱絡", 1.0, 0),
+    facet("topic", "聊到「咖啡」會比較熱絡", 0.3, 60 * 24 * 10),
+    facet("avoid", "對「工作」話題比較冷淡", 0.8, 0),
+]
+
+
+def block(prompt: str, title: str) -> str:
+    """取出 prompt 裡某個【區塊】的內容（到下一個空行為止）。"""
+    start = prompt.index(f"【{title}】\n")  # 區塊標題自成一行；【模式】的說明裡也會提到區塊名稱
+    end = prompt.find("\n\n", start)
+    return prompt[start : end if end != -1 else None]
 
 
 def make_request(**overrides) -> ReplySuggestionRequest:
@@ -70,11 +96,20 @@ class ModeTests(unittest.TestCase):
         self.assertEqual(detect_mode([], at(0)), "opener")
         self.assertEqual(detect_mode([chat("A", "嗨", 0), chat("B", "嗨", 1)], at(2)), "reply")
         self.assertEqual(detect_mode([chat("B", "嗨", 0), chat("A", "嗨", 1)], at(2)), "follow_up")
-        self.assertEqual(detect_mode([chat("B", "嗨", 0)], at(0) + timedelta(days=8)), "revive")
+        # 2026-09-27：最後一則超過 12 小時就是重啟，不論是誰傳的。
+        self.assertEqual(detect_mode([chat("B", "你呢？", 0)], at(0) + timedelta(hours=11)), "reply")
+        self.assertEqual(detect_mode([chat("B", "你呢？", 0)], at(0) + timedelta(hours=13)), "revive")
+        self.assertEqual(detect_mode([chat("A", "嗨", 0)], at(0) + timedelta(hours=13)), "revive")
 
     def test_partner_asked_question_only_looks_after_last_a_message(self):
         self.assertTrue(partner_asked_question([chat("A", "嗨", 0), chat("B", "你呢？", 1)]))
         self.assertFalse(partner_asked_question([chat("B", "你呢？", 0), chat("A", "我還好", 1)]))
+
+    def test_last_requester_question_is_the_unanswered_one(self):
+        messages = [chat("B", "嗨", 0), chat("A", "妳週末都做什麼？", 1), chat("A", "我最近在學做菜", 2)]
+        self.assertEqual(last_requester_question(messages), "妳週末都做什麼？")
+        self.assertIsNone(last_requester_question([*messages, chat("B", "爬山啊", 3)]))  # B 回了
+        self.assertIsNone(last_requester_question([chat("B", "嗨", 0), chat("A", "我最近在學做菜", 1)]))
 
     def test_topic_basis_counts_conversation_profiles_tags_and_facets(self):
         bare = bare_request()
@@ -108,58 +143,158 @@ class SuggesterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sorted(item.reasonCode for item in result.rejected), ["CONTACT_PHONE", "DUPLICATE"]
         )
-        # 聊天室已經有訊息：整批都是 A 80%／B 20%（0.8 × 12 + 0.2 × 5），沒有哪一則是 B 100%。
+        # 回覆模式：整批都是 A 80%／B 20%（0.8 × 12 + 0.2 × 5），沒有哪一則是 B 100%。
         self.assertEqual({item.styleTarget for item in result.suggestions}, {"blend"})
         self.assertEqual(
-            (result.target.rule, result.target.source, result.target.stats.medianChars), ("later", "blend", 10.6)
+            (result.target.rule, result.target.source, result.target.stats.medianChars), ("reply", "blend", 10.6)
         )
-        self.assertEqual((result.modelName, result.promptVersion, result.usage.requests), ("fake-model", "reply-v2", 1))
+        self.assertEqual((result.modelName, result.promptVersion, result.usage.requests), ("fake-model", "reply-v3", 1))
 
         prompt = prompts[0]
         self.assertIn("【模式】reply", prompt)
         self.assertIn("你週末都在幹嘛", prompt)
         self.assertIn("【寫法目標（A 為主、帶一點 B）】", prompt)
         self.assertNotIn("第 1 則", prompt)
+        # 回覆模式維持原本的邏輯：雙方完整檔案、寫法目標含問句比例；但不再寫字數。
         self.assertIn("自我介紹：週末常去爬山", prompt)
+        self.assertIn("是問句", block(prompt, "寫法目標（A 為主、帶一點 B）"))
+        self.assertNotIn("字；", block(prompt, "寫法目標（A 為主、帶一點 B）"))
 
-    async def test_chat_first_message_uses_partner_style_for_every_suggestion(self):
+    async def test_opener_uses_partner_style_and_ranks_questions_first(self):
         prompts: list[str] = []
         suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}, captured=prompts))
         result = await suggester.generate(make_request(recentMessages=[]))
 
         self.assertEqual((result.status, result.mode), ("ok", "opener"))
-        # 要寫整個聊天室的第一則訊息：整批都是 B 100%，不是只有第 1 名。
+        # 開場：整批都是 B 100%，不是只有第 1 名。
         self.assertEqual([item.styleTarget for item in result.suggestions], ["partner", "partner", "partner"])
         self.assertEqual(
-            (result.target.rule, result.target.source, result.target.stats.medianChars),
-            ("first_message", "partner", 5),
+            (result.target.rule, result.target.source, result.target.stats.medianChars), ("opener", "partner", 5)
         )
-        self.assertIn("還沒有任何訊息", prompts[0])
-        self.assertIn("【寫法目標（聊天室的第一則訊息：每一則都完全照 B 喜歡的樣子寫，不要像 A）】", prompts[0])
+        # 開場要用問句引導 B 分享：問句排前面（「爬山啦😂」優先度 2，但不是問句，排到最後）。
+        self.assertEqual(
+            [item.text for item in result.suggestions],
+            ["我週末通常去打羽球欸，妳呢", "週末一起去爬山的話要帶什麼", "爬山啦😂"],
+        )
+        prompt = prompts[0]
+        self.assertIn("還沒有任何訊息", prompt)
+        self.assertIn("用問句引導 B 分享", prompt)
+        self.assertIn("【寫法目標（每一則都完全照 B 喜歡的樣子寫，不要像 A）】", prompt)
+        self.assertNotIn("是問句", block(prompt, "寫法目標（每一則都完全照 B 喜歡的樣子寫，不要像 A）"))
 
-    async def test_partner_rule_stops_once_anyone_sent_the_first_message(self):
-        # 「第一則」指整個聊天室的第一則，不是 A 或 B 各自的第一則：
-        # A 先傳了開場白再按推薦（追問），或 B 先傳、A 要回，都不再套用 B 100%。
-        for messages, mode in (
-            ([chat("A", "嗨，很高興配對到你", 0)], "follow_up"),
-            ([chat("B", "哈囉～", 0)], "reply"),
-        ):
-            suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}))
-            result = await suggester.generate(make_request(recentMessages=messages))
-            self.assertEqual((result.mode, result.target.rule), (mode, "later"))
-            self.assertEqual({item.styleTarget for item in result.suggestions}, {"blend"})
+    async def test_style_ratio_follows_mode(self):
+        # 2026-09-27：回覆 A 80%／B 20%；追問只用 A 自己的語氣；重啟（超過 12 小時）照 B。
+        cases = (
+            ([chat("B", "哈囉～", 0)], at(5), "reply", "blend", "blend"),
+            ([chat("A", "嗨，很高興配對到你", 0)], at(5), "follow_up", "requester", "blend"),
+            ([chat("B", "哈囉～", 0)], at(0) + timedelta(hours=13), "revive", "partner", "partner"),
+        )
+        for messages, now, mode, source, label in cases:
+            prompts: list[str] = []
+            suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}, captured=prompts))
+            result = await suggester.generate(make_request(recentMessages=messages, now=now))
+            self.assertEqual((result.mode, result.target.rule, result.target.source), (mode, mode, source))
+            self.assertEqual({item.styleTarget for item in result.suggestions}, {label})
+            if mode == "follow_up":
+                self.assertIn("【寫法目標（用 A 自己的寫法）】", prompts[0])
 
     async def test_falls_back_to_requester_style_when_partner_unknown(self):
-        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}))
+        prompts: list[str] = []
+        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}, captured=prompts))
         result = await suggester.generate(
             make_request(recentMessages=[], partnerStyle=None, partner=profile("小美", bio="嗨"))
         )
-        # B 沒聊過天、bio 也太短：就算是聊天室的第一則訊息，也只能用 A 的寫法，標成 blend。
+        # B 沒聊過天、bio 也太短：就算是開場，也只能用 A 的寫法，標成 blend。
         self.assertEqual(
-            (result.target.rule, result.target.source, result.target.stats.medianChars),
-            ("first_message", "requester", 12),
+            (result.target.rule, result.target.source, result.target.stats.medianChars), ("opener", "requester", 12)
         )
         self.assertEqual({item.styleTarget for item in result.suggestions}, {"blend"})
+        self.assertIn("【寫法目標（B 沒有足夠資料，改用 A 的寫法）】", prompts[0])
+
+    async def test_topic_modes_use_partner_recent_topics_when_history_is_enough(self):
+        prompts: list[str] = []
+        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}, captured=prompts))
+        await suggester.generate(make_request(recentMessages=[], partnerStyle=card(5, messages=50, facets=PARTNER_FACETS)))
+        prompt = prompts[0]
+        topics = block(prompt, "B 最近在聊的話題")
+        # 越近越優先：咖啡（10 天後）排在權重較高但較舊的登山前面。
+        self.assertLess(topics.index("咖啡"), topics.index("登山"))
+        self.assertIn("對「工作」話題比較冷淡", block(prompt, "B 的寫法與喜好"))
+        # B 的聊天紀錄夠多：不用 B 的主頁原文與共同標籤，只留基本資料。
+        partner_profile = block(prompt, "B 的檔案（聊天對象）")
+        self.assertIn("暱稱：小美", partner_profile)
+        self.assertNotIn("自我介紹", partner_profile)
+        self.assertNotIn("【共同標籤】", prompt)
+        # A 的風格卡沒有話題特徵句：A 那邊改用主頁原文。
+        self.assertIn("自我介紹：喜歡打羽球和煮飯", prompt)
+        self.assertNotIn("【A 最近常聊的話題】\n", prompt)
+
+    async def test_topic_modes_fall_back_to_profiles_when_history_is_short(self):
+        prompts: list[str] = []
+        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}, captured=prompts))
+        partner_style = card(5, messages=10, facets=PARTNER_FACETS)  # 只有 10 則真人訊息
+        requester_style = card(12, messages=40, facets=[facet("topic", "聊到「羽球」會比較熱絡", 1.0, 5)])
+        await suggester.generate(
+            make_request(recentMessages=[], partnerStyle=partner_style, requesterStyle=requester_style)
+        )
+        prompt = prompts[0]
+        # B 的聊天紀錄太少：改用 B 的主頁原文與共同標籤。
+        self.assertNotIn("【B 最近在聊的話題】\n", prompt)
+        self.assertIn("自我介紹：週末常去爬山", prompt)
+        self.assertIn("【共同標籤】\n戶外活動", prompt)
+        # A 的聊天紀錄夠多：A 那邊看最近常聊的話題，不放 A 的主頁原文。
+        self.assertIn("聊到「羽球」會比較熱絡", block(prompt, "A 最近常聊的話題"))
+        self.assertNotIn("自我介紹：喜歡打羽球和煮飯", prompt)
+
+    async def test_follow_up_rephrases_the_unanswered_question(self):
+        prompts: list[str] = []
+        drafts = [
+            draft("妳週末都做什麼？", intent="reask", priority=1),  # 照抄原句 → 刪掉
+            draft("那妳週末通常怎麼過呀？", intent="reask", priority=2),
+            draft("妳最近有去哪裡爬山嗎？", intent="question", priority=1),
+        ]
+        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": drafts}, captured=prompts))
+        messages = [chat("B", "嗨嗨", 0), chat("A", "妳週末都做什麼？", 1)]
+        result = await suggester.generate(make_request(recentMessages=messages))
+
+        self.assertEqual(result.mode, "follow_up")
+        self.assertIn("【A 上一則還沒得到回答的問題】\n妳週末都做什麼？", prompts[0])
+        self.assertEqual([item.reasonCode for item in result.rejected], ["REPEATS_LAST_QUESTION"])
+        self.assertEqual({item.intent for item in result.suggestions}, {"reask", "question"})
+
+    async def test_follow_up_keeps_both_kinds_within_five(self):
+        # 5 則新話題的優先度都比重問高：排序後前 5 名全是新話題，要把最好的重問換進第 5 名。
+        topics = ["妳最近有去哪裡爬山嗎？", "最近有看什麼好看的電影嗎？", "妳平常喜歡喝什麼咖啡？", "週末有推薦的早午餐店嗎？", "最近有在追什麼劇嗎？"]
+        drafts = [draft(text, intent="question", priority=1) for text in topics]
+        drafts.append(draft("那妳週末通常怎麼過呀？", intent="reask", priority=5))
+        suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": drafts}))
+        messages = [chat("B", "嗨嗨", 0), chat("A", "妳週末都做什麼？", 1)]
+        result = await suggester.generate(make_request(recentMessages=messages))
+
+        self.assertEqual([item.intent for item in result.suggestions], ["question"] * 4 + ["reask"])
+        self.assertEqual([item.rank for item in result.suggestions], [1, 2, 3, 4, 5])
+        self.assertEqual([item.reasonCode for item in result.rejected], ["OVER_LIMIT"])
+
+    async def test_revive_uses_opener_method_instead_of_answering(self):
+        drafts = [
+            draft("我週末都在打羽球欸", intent="answer", priority=1),
+            draft("妳最近有去哪裡爬山嗎？", intent="question", priority=2),
+        ]
+        chunk = RetrievedChunk(content="[09-01 12:00] 小美：我喜歡爬山", lastAt=at(0))
+        messages = [chat("A", "嗨", 0), chat("B", "你週末都在幹嘛？", 1)]
+        for now, mode, first in (
+            (at(5), "reply", "我週末都在打羽球欸"),  # 回覆：B 剛問問題 → 回答類第 1
+            (at(1) + timedelta(hours=13), "revive", "妳最近有去哪裡爬山嗎？"),  # 重啟：改用開場做法，問句優先
+        ):
+            prompts: list[str] = []
+            suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": drafts}, captured=prompts))
+            result = await suggester.generate(make_request(recentMessages=messages, now=now, retrievedChunks=[chunk]))
+            self.assertEqual((result.mode, result.suggestions[0].text), (mode, first))
+            if mode == "revive":
+                self.assertIn("超過 12 小時", prompts[0])
+                self.assertNotIn("相關的舊對話片段", prompts[0])
+            else:
+                self.assertIn("相關的舊對話片段", prompts[0])
 
     async def test_exclude_texts_and_partial_and_empty(self):
         suggester = ReplySuggester(SETTINGS, model=json_model({"suggestions": DRAFTS}))
@@ -188,7 +323,7 @@ class SuggesterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prompts, [])  # 完全沒有資料根據：不呼叫模型
         self.assertEqual((result.status, result.mode, result.suggestions), ("empty", "opener", []))
         self.assertEqual(result.notice, "沒有可推薦的句子")
-        self.assertEqual((result.modelName, result.usage.requests, result.promptVersion), (None, 0, "reply-v2"))
+        self.assertEqual((result.modelName, result.usage.requests, result.promptVersion), (None, 0, "reply-v3"))
 
         # 只要有一項根據（這裡是 B 的興趣），就照常請模型產生。
         result = await suggester.generate(bare_request(partner=profile("小美", interests=["登山"])))
