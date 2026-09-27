@@ -1,6 +1,6 @@
 # 遇見 meet · AI 交友平台
 
-Next.js、NestJS、PostgreSQL／pgvector、Redis、MinIO 與 Python AI 服務的本機開發專案。已有帳號、個人檔案、偏好、照片、探索、雙向配對、封鎖與即時聊天。
+Next.js、NestJS、PostgreSQL／pgvector、Redis、SeaweedFS（S3 相容物件儲存）與 Python AI 服務的本機開發專案。已有帳號、個人檔案、偏好、照片、探索、雙向配對、封鎖與即時聊天。
 
 **真人驗證的流程與 provider adapter 已完成，但尚未選定／接入真實模型；未接入時如實回傳「尚未驗證」。目前不是正式上線版本。**
 
@@ -39,12 +39,12 @@ pnpm docker:up                    # 重新啟動／重建
 | api               | NestJS；http://127.0.0.1:3001/api/v1/health    |
 | redis             | 工作佇列與 rate limit；127.0.0.1:6379          |
 | heartlink-pg      | PostgreSQL 16 + pgvector；127.0.0.1:5433       |
-| heartlink-minio   | 媒體儲存；9002，管理介面 http://localhost:9003 |
+| heartlink-s3      | 媒體儲存（SeaweedFS）；S3 在 127.0.0.1:9002，管理介面 http://localhost:9003 |
 | heartlink-adminer | 資料庫管理介面 http://localhost:8090（自動登入）|
 
 `heartlink-*` 三個服務定義在 `docker-compose.override.yml`，`docker compose up -d` 會一起帶起來。
 
-MinIO 管理帳密來自本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`。
+S3 帳密是本機 `.env` 的 `S3_ACCESS_KEY`／`S3_SECRET_KEY`，要和 override 裡 `heartlink-s3` 的設定一致；SeaweedFS 的管理介面預設不用登入，所以兩個埠都只綁本機。照片存在 external volume `heartlink-s3-data`，新機器要先 `docker volume create heartlink-s3-data` 再還原照片。MinIO 已撤下公開映像，2026-09-27 改用 SeaweedFS。
 
 **AI 服務（ai／ai-worker）**：2026-09-23 為了「AI 推薦回覆」重新啟用。
 `ai` 提供 `/internal/ai/*` 給 NestJS 同步呼叫；`ai-worker` 消費 `ai-jobs` 佇列、把結果放進 `ai-results`，
@@ -75,7 +75,7 @@ pnpm db:admin
 ```sh
 pnpm install --frozen-lockfile
 docker compose stop nginx web api
-docker compose up -d --wait heartlink-pg heartlink-minio redis
+docker compose up -d --wait heartlink-pg heartlink-s3 redis
 pnpm db:generate
 pnpm db:migrate
 pnpm dev
@@ -109,7 +109,7 @@ pnpm test:e2e
 pnpm audit --prod --audit-level high
 ```
 
-`pnpm test` 使用真實本機 PostgreSQL／Redis／MinIO／API，並自動清除它建立的隨機帳號及照片；包含 Node → Python BullMQ 互通。`pnpm test:e2e` 建立桌面／手機測試帳號，執行後依本次隨機識別碼清理，保留其他帳號。
+`pnpm test` 使用真實本機 PostgreSQL／Redis／物件儲存／API，並自動清除它建立的隨機帳號及照片；包含 Node → Python BullMQ 互通。`pnpm test:e2e` 建立桌面／手機測試帳號，執行後依本次隨機識別碼清理，保留其他帳號。
 
 整站驗收（每一支 API 對照資料表欄位、雙人聊天與配對、畫面互動、冗餘欄位報表）：
 

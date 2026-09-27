@@ -15,4 +15,4 @@
 - 封鎖與結束配對不刪除歷史訊息，但停止成員存取和收發。解除封鎖不自動恢復配對。
 - 本機容器只綁定 loopback，不代表已具備正式部署、TLS、備份、內容審核或法遵驗收。
 
-MinIO 映像使用官方文件列出的 Quay 來源：<https://min.io/docs/minio/container/index.html>。pnpm 建置腳本依官方 allowBuilds 設定逐項啟用：<https://pnpm.io/settings/build#allowbuilds>。
+MinIO 映像使用官方文件列出的 Quay 來源：<https://min.io/docs/minio/container/index.html>。2026-09 更新：MinIO 撤下社群版的公開映像（Docker Hub 09-11 刪除、quay.io 09-24 起要登入），CI 與 GCP 部署用的 `docker-compose.ci.yml` 改用 S3 相容的 SeaweedFS（Apache-2.0，<https://github.com/seaweedfs/seaweedfs>）；2026-09-27 起 `docker-compose.test.yml` 與本機 override 也改用 SeaweedFS（服務 `heartlink-s3`、external volume `heartlink-s3-data`），照片從 MinIO 完整搬移（10,028 個物件逐一比對內容雜湊）。pnpm 建置腳本依官方 allowBuilds 設定逐項啟用：<https://pnpm.io/settings/build#allowbuilds>。

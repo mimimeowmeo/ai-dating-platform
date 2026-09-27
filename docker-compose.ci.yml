@@ -5,6 +5,9 @@
 # 那個檔案不進版控，CI 上拿不到，api 會因為連不上資料庫而 unhealthy。
 #
 # 不含 ai / ai-worker（服務已移除，見 docker-compose.yml 的說明）。
+#
+# 物件儲存用 SeaweedFS，不是 MinIO：MinIO 已撤下社群版的公開映像（Docker Hub 2026-09-11 刪除、
+# quay.io 2026-09-24 起要登入），CI 拉不到。API 只用 S3 相容的基本操作，換服務不用改程式。
 # 啟動：docker compose -f docker-compose.ci.yml up -d --build --wait
 
 services:
@@ -42,18 +45,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+  s3:
+    image: chrislusf/seaweedfs:4.47
     restart: unless-stopped
-    command: server /data --console-address :9001
+    # weed mini：單一程序跑完 master、volume、filer 與 S3 閘道；有設 AWS 金鑰時所有請求都要簽章。
+    command: ["mini", "-dir=/data"]
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?請執行 pnpm setup}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?請執行 pnpm setup}
-    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
-    volumes: ["minio_data:/data"]
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?請執行 pnpm setup}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?請執行 pnpm setup}
+    # 主機端沿用 9000，.env 的 S3_ENDPOINT（整合測試直連用）不用改；容器內 S3 在 8333。
+    ports: ["127.0.0.1:9000:8333"]
+    volumes: ["s3_data:/data"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
       timeout: 5s
       retries: 15
   api:
@@ -64,7 +69,7 @@ services:
       PORT: 3001
       DATABASE_URL: ${DOCKER_DATABASE_URL:?請執行 pnpm setup}
       REDIS_URL: redis://redis:6379
-      S3_ENDPOINT: http://minio:9000
+      S3_ENDPOINT: http://s3:8333
       S3_ACCESS_KEY: ${S3_ACCESS_KEY}
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET:-dating-media}
@@ -78,7 +83,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      minio: { condition: service_healthy }
+      s3: { condition: service_healthy }
     healthcheck:
       test:
         [
@@ -134,4 +139,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
+  s3_data:
