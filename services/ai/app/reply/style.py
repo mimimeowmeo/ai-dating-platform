@@ -3,20 +3,20 @@
 這裡全部是確定性的計算（不呼叫模型），對應規格 4.2、5.3、5.4：
 - compute_style_stats：從一個人的訊息算出寫法統計（字數、emoji、語助詞…）。
 - cold_start_card：沒有風格卡時，用 bio 做冷啟動。
-- resolve_target：依「整個聊天室有沒有訊息」算出這一批 5 則共用的目標
-  （聊天室的第一則訊息 B 100%；有人傳過訊息之後 A 80%／B 20%）。
-- style_distance：一則候選離目標有多遠，用來排序。
+- resolve_target：依模式算出這一批 5 則共用的目標
+  （開場、重啟 B 100%；回覆 A 80%／B 20%；追問只用 A 的語氣）。
+- has_chat_history：這個人的聊天紀錄夠不夠拿來找話題（真人訊息 ≥ 30 則）。
+- style_distance：一則候選離目標有多遠，用來排序（不看字數）。
 - partner_reactions：B 在這個聊天室對 A 各類訊息回得多熱絡。
 """
 
-import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
 from statistics import mean, median
 from typing import Literal, Sequence
 
-from .schemas import BlendConfig, ChatMessage, OwnMessage, ProfileSnapshot, StyleCard, StyleStats, StyleTarget
+from .schemas import BlendConfig, ChatMessage, Mode, OwnMessage, ProfileSnapshot, StyleCard, StyleStats, StyleTarget
 from .textutil import (
     as_utc,
     count_emoji,
@@ -41,7 +41,8 @@ SITE_DEFAULT_STATS = StyleStats(
     particles={},
 )
 
-HIGH_CONFIDENCE_MESSAGES = 30  # 真人訊息 ≥ 30 則：風格卡以聊天為主（規格 5.3）
+# 真人訊息 ≥ 30 則：風格卡以聊天為主（規格 5.3）；也是「聊天紀錄夠不夠拿來找話題」的門檻（2026-09-27）。
+HIGH_CONFIDENCE_MESSAGES = 30
 MIN_BIO_CHARS = 10  # bio 少於 10 個字：不足以當寫法樣本
 BURST_GAP = timedelta(seconds=60)  # 同一聊天室 60 秒內的連續訊息算同一次「連發」
 MAX_BURST_MEAN = 50.0  # 平均連發則數的上限，與 StyleStats.burstMean 的欄位上限一致
@@ -135,7 +136,7 @@ def stats_from_bio(bio: str, site: StyleStats) -> StyleStats:
 def blend_stats(base: StyleStats, other: StyleStats, other_weight: float) -> StyleStats:
     """把兩個人的寫法依比例混合：目標 = (1 − w) × base + w × other。
 
-    base 是 A、other 是 B：寫整個聊天室的第一則訊息時 w = 1.0（完全照 B），之後預設 w = 0.2。
+    base 是 A、other 是 B：開場與重啟 w = 1.0（完全照 B），回覆 w = 0.2，追問 w = 0（只用 A）。
     數值欄位做線性內插；語助詞把兩邊的比例加權後重新挑前幾名。
     """
     weight = max(0.0, min(1.0, other_weight))
@@ -167,9 +168,8 @@ def blend_stats(base: StyleStats, other: StyleStats, other_weight: float) -> Sty
 
 @dataclass(frozen=True)
 class CandidateFeatures:
-    """一則候選訊息的寫法特徵：字數、emoji 數、有沒有笑聲詞、用了哪些語助詞。"""
+    """一則候選訊息的寫法特徵：emoji 數、有沒有笑聲詞、用了哪些語助詞。"""
 
-    chars: int
     emoji: int
     laughter: bool
     particles: frozenset[str]
@@ -178,7 +178,6 @@ class CandidateFeatures:
 def candidate_features(text: str) -> CandidateFeatures:
     """擷取一則候選的寫法特徵，給 style_distance 使用。"""
     return CandidateFeatures(
-        chars=visible_chars(text),
         emoji=count_emoji(text),
         laughter=has_laughter(text),
         particles=frozenset(particles_in(text)),
@@ -186,18 +185,17 @@ def candidate_features(text: str) -> CandidateFeatures:
 
 
 def style_distance(text: str, target: StyleStats) -> float:
-    """計算一則候選離風格目標有多遠（0 最像，大約到 1）。
+    """計算一則候選離風格目標有多遠（0 最像，最多 1）。
 
     加權組成（權重是可調的經驗值，見規格第 11 節）：
-    - 字數 50%：比較字數與目標中位數的「對數比例」，長一倍和短一半算一樣遠；差到 e² 倍以上封頂。
-    - emoji 15%：這則的 emoji 數跟目標「每則平均幾個」差多少（最多算 3 個）。
-    - 笑聲詞 15%：有沒有笑聲詞，跟目標的笑聲詞比例差多少。
-    - 語助詞 20%：沒用到目標常用的語助詞扣一半；用了目標從來不用的語助詞再扣一半。
+    - emoji 30%：這則的 emoji 數跟目標「每則平均幾個」差多少（最多算 3 個）。
+    - 笑聲詞 30%：有沒有笑聲詞，跟目標的笑聲詞比例差多少。
+    - 語助詞 40%：沒用到目標常用的語助詞扣一半；用了目標從來不用的語助詞，依比例再扣最多一半。
+    字數不列入（2026-09-27 使用者決定）：只保留 80 字的硬上限（見 suggest.MAX_SUGGESTION_CHARS），
+    短句不扣分、比平常長也不扣分。
     問句不列入：單一則訊息「是不是問句」由內容決定，不該被風格目標壓抑。
     """
     features = candidate_features(text)
-    length_gap = abs(math.log((features.chars + 1) / (target.medianChars + 1)))
-    d_length = min(length_gap, 2.0) / 2.0
     d_emoji = abs(min(features.emoji, 3) - min(target.emojiPerMessage, 3.0)) / 3.0
     d_laughter = abs((1.0 if features.laughter else 0.0) - target.laughterRatio)
     habitual = {particle for particle, ratio in target.particles.items() if ratio >= 0.2}
@@ -207,7 +205,7 @@ def style_distance(text: str, target: StyleStats) -> float:
         len(features.particles - known) / len(features.particles) if features.particles and known else 0.0
     )
     d_particles = 0.5 * missing_habit + 0.5 * foreign
-    return round(0.5 * d_length + 0.15 * d_emoji + 0.15 * d_laughter + 0.2 * d_particles, 4)
+    return round(0.3 * d_emoji + 0.3 * d_laughter + 0.4 * d_particles, 4)
 
 
 def cold_start_card(profile: ProfileSnapshot, site: StyleStats, user_id: str | None = None) -> StyleCard:
@@ -242,27 +240,39 @@ def usable_card(card: StyleCard | None, profile: ProfileSnapshot, site: StyleSta
     return card
 
 
-def resolve_target(requester: StyleCard, partner: StyleCard, blend: BlendConfig, first_message: bool) -> StyleTarget:
-    """算出這一批 5 則共用的風格目標（規格 4.1、4.2；2026-09-23 使用者更正）。
+def partner_weight(blend: BlendConfig, mode: Mode) -> float:
+    """取出這個模式下 B 的權重（0＝只用 A 的寫法，1＝完全照 B 喜歡的樣子）。"""
+    return {
+        "opener": blend.openerPartnerWeight,
+        "reply": blend.replyPartnerWeight,
+        "follow_up": blend.followUpPartnerWeight,
+        "revive": blend.revivePartnerWeight,
+    }[mode]
 
-    「第一則訊息」指的是整個聊天室的第一則訊息，不是 A 或 B 各自的第一則：
-    - first_message=True（聊天室還沒有任何訊息）：依 firstMessagePartnerWeight 混合，
-      預設 1.0，5 則全部照 B 喜歡的樣子寫，不像 A。
-    - first_message=False（只要有人傳過訊息，不論是誰）：依 laterPartnerWeight 混合，
-      預設 0.2，也就是 A 80%／B 20%。
-    - B 的風格卡信心為 none（沒聊過天、bio 也太短）：不論哪一種都只用 A 的寫法，
-      source 回報 requester（規格 5.3）。
+
+def resolve_target(requester: StyleCard, partner: StyleCard, blend: BlendConfig, mode: Mode) -> StyleTarget:
+    """算出這一批 5 則共用的風格目標（規格 4.1、4.2；2026-09-27 使用者決定依模式分開）。
+
+    - 開場（聊天室還沒有任何訊息）、重啟（改用開場的做法）：預設 B 100%，照 B 喜歡的樣子寫、不像 A。
+    - 回覆：預設 A 80%／B 20%。
+    - 追問：預設只用 A 自己的語氣（B 0%）。
+    - B 的風格卡信心為 none（沒聊過天、bio 也太短）：只用 A 的寫法（規格 5.3）。
 
     source 依實際比例標示：權重 1 是 partner、0 是 requester、介於中間是 blend。
     """
-    rule: Literal["first_message", "later"] = "first_message" if first_message else "later"
-    if partner.confidence == "none":
-        return StyleTarget(rule=rule, source="requester", stats=requester.stats)
-    weight = blend.firstMessagePartnerWeight if first_message else blend.laterPartnerWeight
-    source: Literal["partner", "blend", "requester"] = (
-        "partner" if weight >= 1.0 else "requester" if weight <= 0.0 else "blend"
-    )
-    return StyleTarget(rule=rule, source=source, stats=blend_stats(requester.stats, partner.stats, weight))
+    weight = partner_weight(blend, mode)
+    if partner.confidence == "none" or weight <= 0.0:
+        return StyleTarget(rule=mode, source="requester", stats=requester.stats)
+    source: Literal["partner", "blend"] = "partner" if weight >= 1.0 else "blend"
+    return StyleTarget(rule=mode, source=source, stats=blend_stats(requester.stats, partner.stats, weight))
+
+
+def has_chat_history(card: StyleCard) -> bool:
+    """這個人的聊天紀錄夠不夠拿來找話題：風格卡萃取時用了 ≥ 30 則真人訊息（2026-09-27 使用者決定）。
+
+    不夠時（包括沒有風格卡、只用 bio 冷啟動），找話題改用主頁原文。
+    """
+    return card.messageCount >= HIGH_CONFIDENCE_MESSAGES
 
 
 def classify_message_type(text: str) -> MessageType:

@@ -13,6 +13,7 @@ import { Queue, Worker, type Job } from "bullmq";
 import { Database, config } from "./core";
 import { AiData, JOB_MESSAGES } from "./ai-data";
 import { VectorStore } from "./ai-store";
+import { STYLE_REFRESH_AFTER_MS, styleCardIsStale } from "./ai-text";
 import {
   chunkResult,
   styleProfileResult,
@@ -196,6 +197,17 @@ export class AiJobs implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /** 使用者在 since 之後自己發了幾則真人訊息（since 為 null 時算全部）；AI 來源的訊息不算。 */
+  private humanMessagesSince(userId: string, since: Date | null) {
+    return this.db.message.count({
+      where: {
+        senderId: userId,
+        OR: [{ origin: { is: null } }, { origin: { origin: "human" } }],
+        ...(since ? { createdAt: { gt: since } } : {}),
+      },
+    });
+  }
+
   /** 使用者自上次萃取後又累積滿 200 則真人訊息，就重新萃取風格卡。 */
   private async enqueueStyleIfDue(userId: string) {
     const profile = await this.db.userStyleProfile.findFirst({
@@ -203,16 +215,32 @@ export class AiJobs implements OnModuleInit, OnModuleDestroy {
       orderBy: { version: "desc" },
       select: { windowTo: true },
     });
-    const since = profile?.windowTo ?? null;
-    const added = await this.db.message.count({
-      where: {
-        senderId: userId,
-        OR: [{ origin: { is: null } }, { origin: { origin: "human" } }],
-        ...(since ? { createdAt: { gt: since } } : {}),
-      },
-    });
+    const added = await this.humanMessagesSince(
+      userId,
+      profile?.windowTo ?? null,
+    );
     if (added < STYLE_EVERY) return;
     await this.enqueueStyle(userId);
+  }
+
+  /**
+   * 按推薦時順手檢查風格卡夠不夠新（2026-09-27 使用者決定：每天最多更新一次）。
+   *
+   * 卡片建立超過 24 小時、而且之後又多了 20 則以上真人訊息（styleCardIsStale），
+   * 就延後 3 分鐘重新萃取；同一位使用者 1 小時內只會排一次（見 enqueueStyle）。
+   * 開場、追問、重啟依「最近在聊的話題」找話題，卡片太舊就抓不到最近的話題。
+   */
+  async enqueueStyleIfStale(
+    userId: string,
+    createdAt: Date,
+    windowTo: Date | null,
+  ) {
+    const now = new Date();
+    // 卡片還不到 24 小時就不用數訊息，省一次查詢。
+    if (now.getTime() - createdAt.getTime() < STYLE_REFRESH_AFTER_MS) return;
+    const added = await this.humanMessagesSince(userId, windowTo);
+    if (!styleCardIsStale(createdAt, added, now)) return;
+    await this.enqueueStyle(userId, STYLE_AFTER_SUGGEST_DELAY_MS);
   }
 
   /**

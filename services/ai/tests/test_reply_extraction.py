@@ -60,6 +60,28 @@ class StyleProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.embeddingModel, "fake-embedding")
         self.assertEqual(card.modelName, "fake-model")
 
+    async def test_batches_cover_at_most_seven_days_and_facets_remember_when_seen(self):
+        # 2026-09-27：一批最多涵蓋 7 天，特徵句記下最後出現在哪一批（lastSeenAt），推薦時越近越優先。
+        outputs = iter(
+            [
+                {"voiceNotes": ["句子很短"], "topics": [{"topic": "登山", "heat": 5}]},
+                {"topics": [{"topic": "咖啡", "heat": 3}, {"topic": "登山", "heat": 2}]},
+            ]
+        )
+        prompts: list[str] = []
+        builder = StyleProfileBuilder(
+            SETTINGS, model=json_model(lambda: next(outputs), captured=prompts), embedder=FakeEmbedder()
+        )
+        early = [own(f"早期的訊息{index}", index) for index in range(20)]
+        late = [own(f"後來的訊息{index}", 60 * 24 * 10 + index) for index in range(20)]  # 10 天後
+        result = await builder.build(StyleProfileRequest(userId="u-b", messages=early + late))
+
+        self.assertEqual(len(prompts), 2)  # 橫跨 10 天 → 切成兩批
+        seen = {facet.statement: facet.lastSeenAt for facet in result.card.facets}
+        self.assertEqual(seen["聊到「咖啡」會比較熱絡"], late[-1].createdAt)
+        self.assertEqual(seen["聊到「登山」會比較熱絡"], late[-1].createdAt)  # 兩批都有 → 取較新的那批
+        self.assertEqual(seen["句子很短"], early[-1].createdAt)
+
     async def test_bio_only_mixed_and_none(self):
         prompts: list[str] = []
         builder = StyleProfileBuilder(SETTINGS, model=json_model(MAP_OUTPUT, captured=prompts), embedder=FakeEmbedder())

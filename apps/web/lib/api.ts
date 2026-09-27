@@ -105,7 +105,9 @@ export type ReplySuggestion = {
   id: string;
   rank: number;
   text: string;
-  intent: "answer" | "question" | "callback" | "humor" | "plan" | "share";
+  // reask：追問時「換個說法再問一次」自己上一則還沒得到回答的問題。
+  intent:
+    "answer" | "question" | "callback" | "humor" | "plan" | "share" | "reask";
 };
 /**
  * 按一次「AI 推薦回覆」的結果。
