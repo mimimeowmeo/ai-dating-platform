@@ -9,7 +9,7 @@
 - 檔名沒有 test_ 開頭，所以 `python -m unittest discover` 不會把它當成測試執行；只能像上面那樣手動跑。
 - 模型檔只在 face 容器裡（Docker build 時下載與轉換），所以要在容器內執行；
   映像檔本身不含 tests 資料夾，要用 -v 把本機的 tests 唯讀掛進 /app/tests。
-- 這裡只送自拍與主照片、沒有 liveCapture（即時鏡頭的動作影格），依 policy 版本 3，
+- 這裡只送自拍與主照片、沒有 liveCapture（即時鏡頭的動作影格），依 policy（版本 3 起），
   全部通過時的結果是 unavailable / LIVE_CAPTURE_REQUIRED，不會是 verified；
   要看的是 reasonCode 以及 livenessScore（防偽分數）、faceMatchScore（比對分數）是否合理。
 """

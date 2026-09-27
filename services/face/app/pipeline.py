@@ -1,4 +1,4 @@
-"""真人驗證的判定流程（pipeline）：把請求裡的影像交給三個模型，依 policy 決定回應。
+"""真人驗證的判定流程（pipeline）：把請求裡的影像交給四個模型，依 policy 決定回應。
 
 輸入（VerifyRequest，由 AI 服務轉送）：
 - imageBase64：正面影格（即時鏡頭）或使用者上傳的自拍檔。
@@ -7,14 +7,17 @@
 
 流程（FaceVerifier._decide）：
 1. 每張影像都要剛好偵測到一張夠大的臉。
-2. 有 liveCapture 時：用 pose.py 算頭部角度，確認正面影格大致正對鏡頭、每個動作都做到，而且動作影格和正面影格是同一個人。
+2. 有 liveCapture 時：用 MediaPipe Face Landmarker 的點與 pose.py 算頭部角度，確認正面影格大致正對鏡頭、
+   每個動作都做到，而且動作影格和正面影格是同一個人。動作挑戰沒過時，在 log 印一行診斷資料（見 _challenge_failed）。
 3. 被動防偽（MiniFASNet，每張影格都做）與大頭貼比對（SFace）。
-4. 依 policy 版本 3 決定狀態：只有上傳的自拍檔（沒有 liveCapture）全部通過也只回
+4. 依 policy 版本 4 決定狀態：只有上傳的自拍檔（沒有 liveCapture）全部通過也只回
    unavailable／LIVE_CAPTURE_REQUIRED；即時鏡頭全部通過才回 verified／VERIFICATION_PASSED。
 
 回應（VerifyResponse）的欄位必須和 services/ai 的 ProviderResult 完全一致。
 """
 
+# json：把動作挑戰的診斷資料印成一行 JSON。
+import json
 # threading：Python 內建的執行緒工具；這裡只用它的 Lock（鎖），讓模型一次只被一個請求使用。
 import threading
 
@@ -27,8 +30,8 @@ from . import policy
 from .imaging import InvalidImage, decode_bgr, fit_within
 # Face：YuNet 偵測結果；Models：三個模型的組合（測試可換成假模型）。
 from .models import Face, Models
-# action_performed：判斷動作有沒有做到；head_pose：用 5 個臉部點算頭部角度。
-from .pose import action_performed, facing_camera, head_pose
+# HeadPose：頭部角度；action_problem：判斷動作有沒有做到；facing_camera：正面影格是否正對鏡頭；head_pose：用 5 個臉部點算角度。
+from .pose import HeadPose, action_problem, facing_camera, head_pose
 # 三種影像的大小上限，以及請求／回應的資料格式。
 from .schemas import MAX_FRAME_BYTES, MAX_IMAGE_BYTES, MAX_REFERENCE_BYTES, VerifyRequest, VerifyResponse
 
@@ -111,6 +114,49 @@ def _result(status, reason, *, liveness=False, identity=False, liveness_score=No
         # 兩個分數（可能是 None）
         livenessScore=liveness_score, faceMatchScore=match_score,
     )
+
+
+def _challenge_failed(request_id: str, reason: str, *, action=None, neutral=None, pose=None) -> VerifyResponse:
+    """在 log 印一行動作挑戰的診斷資料，再回傳 rejected／CHALLENGE_FAILED。
+
+    參數：
+        request_id：請求編號（NestJS 傳的是驗證紀錄的 id），用來對回資料庫的 verification_records。
+        reason：失敗的子原因，只寫進 log，不改變對外的 reasonCode：
+            NEUTRAL_POSE_UNAVAILABLE／NEUTRAL_NOT_FACING：正面影格量不到角度（Face Landmarker 沒有剛好找到一張臉）或沒有正對鏡頭；
+            POSE_UNAVAILABLE：動作影格量不到角度；ROLL_CHANGED／INSUFFICIENT／UNKNOWN_ACTION：見 pose.action_problem。
+        action：失敗的動作名稱（正面影格的問題時為 None）。
+        neutral：正面影格的頭部角度；有 pose 時一起用來算變化量，只有它時記錄正面影格的 yaw 與 roll。
+        pose：動作影格的頭部角度。
+
+    回傳：
+        VerifyResponse：rejected／CHALLENGE_FAILED。
+
+    設計理由：
+        以前所有動作挑戰的失敗都只有 CHALLENGE_FAILED，無從得知是哪個動作、差多少。
+        log 只記變化量與正面影格的朝向，不記影像、臉部點座標與 pitch 的絕對值（它反映的是五官比例）。
+    """
+    # 每筆都有的欄位：事件名稱、請求編號、政策版本、子原因。
+    entry = {"event": "CHALLENGE_FAILED", "requestId": request_id, "policy": policy.POLICY_VERSION, "reason": reason}
+    # 動作影格的問題才有動作名稱。
+    if action is not None:
+        # 記下是哪個動作沒過。
+        entry["action"] = action
+    # 兩個角度都有：記錄動作影格相對正面影格的變化量（和門檻比較的就是這三個數字）。
+    if neutral is not None and pose is not None:
+        # yaw、pitch 是比例值，取到小數第 3 位；roll 是角度，取到小數第 1 位。
+        entry.update(
+            yawChange=round(pose.yaw - neutral.yaw, 3),
+            pitchChange=round(pose.pitch - neutral.pitch, 3),
+            rollChange=round(pose.roll - neutral.roll, 1),
+        )
+    # 只有正面影格的角度（正面影格沒有正對鏡頭）：記錄它偏了多少。
+    elif neutral is not None:
+        # 和 policy.NEUTRAL_MAX_YAW、NEUTRAL_MAX_ROLL_DEGREES 比較的兩個數字。
+        entry.update(neutralYaw=round(neutral.yaw, 3), neutralRoll=round(neutral.roll, 1))
+    # 印成一行 JSON 到標準輸出（會進容器 log）；flush=True 讓它立刻寫出。
+    print(json.dumps(entry), flush=True)
+    # 對外仍是同一個原因碼，前端與 API 不需要改。
+    return _result("rejected", "CHALLENGE_FAILED")
 
 
 def _decode_prefixed(image_base64: str, mime_type: str, max_bytes: int, prefix: str) -> np.ndarray:
@@ -199,16 +245,40 @@ class FaceVerifier:
             ]
         # with 區塊：進入時取得鎖、離開時（包含 return 或丟錯）自動釋放，確保模型一次只被一個請求使用。
         with self._lock:
-            # 交給 _decide 做實際判定。
-            return self._decide(selfie, references, frames)
+            # 交給 _decide 做實際判定；請求編號只用在診斷 log。
+            return self._decide(selfie, references, frames, request.requestId)
 
-    def _decide(self, selfie: np.ndarray, references: list[np.ndarray], frames) -> VerifyResponse:
+    def close(self) -> None:
+        """釋放模型資源；服務關閉時由 main.py 呼叫。"""
+        # 交給 Models 關閉需要明確釋放的模型。
+        self._models.close()
+
+    def _pose(self, image: np.ndarray) -> HeadPose | None:
+        """用 Face Landmarker 量一張影像的頭部角度。
+
+        參數：
+            image：原始大小的 BGR 影像（不用縮小後的工作影像，和前端拿鏡頭原始畫面量角度一致）。
+
+        回傳：
+            剛好找到一張臉時回傳 HeadPose；沒有臉、多張臉或臉部點異常時回傳 None（呼叫端判 CHALLENGE_FAILED）。
+
+        設計理由：
+            YuNet 已確認剛好一張臉，但兩個模型是分開偵測的；Face Landmarker 看到的臉數不是 1 時，
+            無法確定量到的是同一張臉，所以不量（fail closed）。
+        """
+        # 找出每張臉的 5 個臉部位置。
+        faces = self._models.landmarker.locate(image)
+        # 剛好一張才算角度。
+        return head_pose(faces[0]) if len(faces) == 1 else None
+
+    def _decide(self, selfie: np.ndarray, references: list[np.ndarray], frames, request_id: str) -> VerifyResponse:
         """依序執行所有檢查，第一個不通過的檢查就決定回應（提早 return）。
 
         參數：
             selfie：正面影格或上傳自拍，原始大小的 BGR 影像。
             references：主照片（BGR 影像）清單，只使用第一張。
             frames：即時鏡頭的 [(動作名稱, BGR 影像), ...]；上傳自拍（沒有 liveCapture）時為 None。
+            request_id：請求編號，只寫進動作挑戰失敗的診斷 log。
 
         回傳：
             VerifyResponse。可能的結果：
@@ -264,12 +334,15 @@ class FaceVerifier:
         # frames 是 None 時代表上傳的自拍檔，跳過這整段。
         if frames is not None:
             # 正面影格的頭部角度當基準（neutral），動作影格要和它比較變化量。
-            neutral = head_pose(face)
-            # 臉部點不合理（兩眼距離或眼睛到嘴角的距離小於 1 像素，包含嘴角在眼睛上方）時算不出角度；
-            # 正面影格本身沒有大致正對鏡頭（左右偏或歪頭太多）也不行，否則偏頭的「正面」能讓正臉照冒充反方向的動作。
-            if neutral is None or not facing_camera(neutral):
+            neutral = self._pose(selfie)
+            # Face Landmarker 沒有剛好找到一張臉，或臉部點不合理（兩眼距離或眼睛到嘴角的距離小於 1 像素）時算不出角度。
+            if neutral is None:
                 # 無法判斷動作，視為挑戰失敗。
-                return _result("rejected", "CHALLENGE_FAILED")
+                return _challenge_failed(request_id, "NEUTRAL_POSE_UNAVAILABLE")
+            # 正面影格本身沒有大致正對鏡頭（左右偏或歪頭太多）也不行，否則偏頭的「正面」能讓正臉照冒充反方向的動作。
+            if not facing_camera(neutral):
+                # 視為挑戰失敗。
+                return _challenge_failed(request_id, "NEUTRAL_NOT_FACING", neutral=neutral)
             # 逐張檢查動作影格；action 是動作名稱，image 是解碼後的影像。
             for action, image in frames:
                 # 同樣縮到長邊 640 以內；frame_ratio 是縮放比例，防偽時要把臉框換算回原圖座標。
@@ -282,12 +355,18 @@ class FaceVerifier:
                 if problem:
                     # 加上 "ACTION_" 前綴，例如 "ACTION_MULTIPLE_FACES_DETECTED"。
                     return _result("rejected", f"ACTION_{problem}")
-                # 算這張影格的頭部角度。
-                pose = head_pose(frame_faces[0])
-                # 算不出角度，或和正面影格相比的變化量沒有超過門檻（方向也要對），就算沒做到動作。
-                if pose is None or not action_performed(action, neutral, pose):
+                # 用原始大小的影格量頭部角度。
+                pose = self._pose(image)
+                # 算不出角度就無法判斷動作。
+                if pose is None:
                     # 挑戰失敗。
-                    return _result("rejected", "CHALLENGE_FAILED")
+                    return _challenge_failed(request_id, "POSE_UNAVAILABLE", action=action)
+                # 和正面影格相比的變化量沒有超過門檻（方向也要對）或側傾變化太大，就算沒做到動作。
+                problem = action_problem(action, neutral, pose)
+                # 有原因代表沒做到。
+                if problem:
+                    # 挑戰失敗；log 記下這個動作的變化量。
+                    return _challenge_failed(request_id, problem, action=action, neutral=neutral, pose=pose)
                 # 動作影格和正面影格的餘弦相似度：兩個向量長度都是 1，內積就是相似度；轉成 Python float。
                 same_person = float(np.dot(selfie_embedding, models.embedder.embed(frame_work, frame_faces[0])))
                 # 低於同一人門檻：拍攝途中換了人（例如正面是本人，轉頭時換成別人），拒絕。

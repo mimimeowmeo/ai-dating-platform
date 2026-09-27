@@ -76,7 +76,7 @@ class ProviderApiTests(unittest.TestCase):
         為什麼重要：AI 服務會嚴格檢查 provider 的回應（Content-Type、大小、欄位），
         任何一點不符都會被當成 PROVIDER_INVALID_RESPONSE，使用者就永遠無法完成驗證。
         情境：預設的請求只有自拍與主照片、沒有 liveCapture（即時鏡頭的動作影格），
-        假模型讓偵測、比對（相似度 0.8）、防偽都通過，依 policy 版本 3 應回 unavailable / LIVE_CAPTURE_REQUIRED。
+        假模型讓偵測、比對（相似度 0.8）、防偽都通過，依 policy（版本 3 起）應回 unavailable / LIVE_CAPTURE_REQUIRED。
         """
         # 帶正確 token 送出預設請求（一張自拍、一張主照片、沒有動作影格）。
         response = self.client().post(VERIFY_PATH, json=verify_request(), headers=HEADERS)

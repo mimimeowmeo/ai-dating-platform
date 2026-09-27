@@ -2,6 +2,7 @@
 // 使用者的瀏覽器不會連到 Google。dev 與 build 前都會執行；檔案已經正確就跳過。
 // - WASM：從 node_modules/@mediapipe/tasks-vision/wasm 複製（版本跟著 package.json 鎖定的 0.10.34）。
 // - 模型：face_landmarker.task 從 Google 的模型庫下載，驗證大小與 sha256，不符就中止。
+//   services/face/tools/fetch_models.py 鎖定同一個檔案（伺服器用它重算頭部角度），更新時兩邊要一起改。
 import { createHash } from "node:crypto";
 import {
   copyFileSync,

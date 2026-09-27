@@ -1,0 +1,6 @@
+# 用 pip install --no-deps 安裝（見 Dockerfile），不讓 pip 自動拉相依套件：
+# - MediaPipe 宣告相依 opencv-contrib-python，它和 requirements.txt 的 opencv-python-headless 都提供 cv2，
+#   OpenCV 官方說明同一個環境只能裝其中一種（https://github.com/opencv/opencv-python#installation-and-usage）。
+# - 它宣告的 sounddevice 只有音訊功能用到，這裡用不到。
+# 真正需要的相依套件（absl-py、flatbuffers、matplotlib 與其相依套件、numpy）已鎖在 requirements.txt。
+mediapipe==1.0.1

@@ -1,4 +1,4 @@
-"""用真的模型檔確認 OpenCV／onnxruntime 能載入並執行；只在容器內（有 /app/models）時執行。
+"""用真的模型檔確認 OpenCV／onnxruntime／MediaPipe 能載入並執行；只在容器內（有 /app/models）時執行。
 
 依 SECURITY.md，repo 不放人臉照片，所以這裡只用合成影像，確認的是「模型接得上、輸出格式正確」，
 不是辨識準確度。用真實照片的手動檢查見 tests/smoke_local_images.py。
@@ -8,6 +8,12 @@
 所以這支測試要在容器裡執行；在沒有模型檔的電腦上會自動略過（skip），不算失敗。
 """
 
+# gc：Python 的垃圾回收，用來強制回收已刪除的物件，觸發它的 __del__。
+import gc
+# sys：替換 sys.unraisablehook，收集 __del__ 裡發生、平常只會印在 log 的錯誤。
+import sys
+# ThreadPoolExecutor：在別的執行緒呼叫模型，模擬 main.py 用 asyncio.to_thread 執行判定。
+from concurrent.futures import ThreadPoolExecutor
 # unittest：Python 內建的測試框架。
 import unittest
 
@@ -18,8 +24,8 @@ import numpy as np
 from app import policy
 # Settings：讀環境變數取得模型資料夾（FACE_MODEL_DIR，沒設定時是 /app/models）。
 from app.config import Settings
-# Face：一筆人臉偵測結果；load_models：載入 YuNet、SFace、MiniFASNet 三個真模型。
-from app.models import Face, load_models
+# Face：一筆人臉偵測結果；load_models：載入四個真模型；FACE_LANDMARKER_FILE、MediaPipeLandmarker：單獨建立 Face Landmarker。
+from app.models import FACE_LANDMARKER_FILE, Face, MediaPipeLandmarker, load_models
 # FaceVerifier：完整的判定流程，這裡用真模型跑一次。
 from app.pipeline import FaceVerifier
 # VerifyRequest：/verify 的請求格式（pydantic 模型），把字典轉成 pipeline 需要的物件。
@@ -35,7 +41,7 @@ MODEL_DIR = Settings.from_env().model_dir
 # 只有 YuNet 模型檔存在時才執行整個類別；否則全部標記為略過，並顯示原因。
 @unittest.skipUnless((MODEL_DIR / "face_detection_yunet_2023mar.onnx").is_file(), "模型檔不存在（只在容器內執行）")
 class RealModelTests(unittest.TestCase):
-    """用真的三個模型檢查輸入輸出格式；只用合成影像，不測準確度。"""
+    """用真的四個模型檢查輸入輸出格式；只用合成影像，不測準確度。"""
 
     @classmethod
     def setUpClass(cls):
@@ -47,8 +53,14 @@ class RealModelTests(unittest.TestCase):
             ModelError("MODEL_FILES_MISSING")：YuNet 以外的模型檔缺少時（YuNet 缺少時整個類別已被略過）。
         設計理由：載入 ONNX 模型比較慢，每個測試各載一次會浪費時間；這些測試都不會改變模型的狀態。
         """
-        # 用和正式執行相同的偵測門檻載入三個模型，存成類別屬性，每個測試用 self.models 取用。
+        # 用和正式執行相同的偵測門檻載入四個模型，存成類別屬性，每個測試用 self.models 取用。
         cls.models = load_models(MODEL_DIR, policy.DETECTION_SCORE_THRESHOLD)
+
+    @classmethod
+    def tearDownClass(cls):
+        """整個類別結束後釋放模型資源（和 main.py 關閉服務時的做法相同）。"""
+        # 關閉 Face Landmarker。
+        cls.models.close()
 
     def test_blank_image_has_no_face(self):
         """規則：沒有臉的影像，偵測器要回傳空清單。
@@ -122,6 +134,51 @@ class RealModelTests(unittest.TestCase):
         self.assertLessEqual(result.real_probability, 1.0)
         # is_real 必須是 Python 的 bool（不是 numpy 的 bool_ 或數字）。
         self.assertIsInstance(result.is_real, bool)
+
+    def test_face_landmarker_finds_no_face_in_blank_image(self):
+        """規則：Face Landmarker 在沒有臉的影像回傳空清單，從別的執行緒呼叫也一樣。
+
+        為什麼重要：確認同一個模型檔（前端也用它）在伺服器載入得了、BGR 轉 RGB 與輸出格式正確；
+        main.py 用 asyncio.to_thread 執行判定，每次可能在不同的執行緒，MediaPipe 必須能接受。
+        """
+        # 高 720、寬 960 的純灰色影像（和前端拍下的影格同樣大小）。
+        image = np.full((720, 960, 3), 128, dtype=np.uint8)
+        # 在目前的執行緒呼叫：沒有臉，回傳空清單。
+        self.assertEqual(self.models.landmarker.locate(image), [])
+        # 兩個工作執行緒各呼叫一次（依序，不同時），結果一樣是空清單。
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # 送出兩個工作並取回結果。
+            results = [pool.submit(self.models.landmarker.locate, image).result() for _ in range(2)]
+        # 兩次都是空清單。
+        self.assertEqual(results, [[], []])
+
+    def test_face_landmarker_closes_cleanly(self):
+        """規則：Face Landmarker 關閉後被垃圾回收時，不會再產生錯誤。
+
+        為什麼重要：服務關閉時 main.py 會先呼叫 close()，之後 Python 結束時物件的 __del__ 還會再關一次；
+        第二次關閉不能出錯，否則每次重啟容器都會在 log 留下誤導的錯誤訊息。
+        """
+        # 收集 __del__ 裡發生的錯誤。
+        errors = []
+        # 保存原本的處理函式，測試結束要還原。
+        original = sys.unraisablehook
+        # 換成收集到清單。
+        sys.unraisablehook = errors.append
+        # 確保一定會還原。
+        try:
+            # 單獨建立一個 Face Landmarker。
+            landmarker = MediaPipeLandmarker(MODEL_DIR / FACE_LANDMARKER_FILE)
+            # 明確關閉（和 main.py 的 lifespan 相同）。
+            landmarker.close()
+            # 刪掉最後一個參照並強制回收，觸發 __del__。
+            del landmarker
+            # 執行垃圾回收。
+            gc.collect()
+        finally:
+            # 還原原本的處理函式。
+            sys.unraisablehook = original
+        # 不能有任何錯誤。
+        self.assertEqual(errors, [])
 
 
 # 直接執行這個檔案時才跑測試；被 unittest discover 匯入時不會進來。

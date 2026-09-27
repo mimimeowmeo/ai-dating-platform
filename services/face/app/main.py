@@ -17,6 +17,8 @@
 import asyncio
 # secrets：Python 內建的安全相關工具；這裡用 compare_digest 做「固定時間」的字串比對，避免時序攻擊（timing attack）。
 import secrets
+# asynccontextmanager：把「yield 前啟動、yield 後關閉」的 async 函式變成 FastAPI 的 lifespan。
+from contextlib import asynccontextmanager
 
 # FastAPI：Web 框架本體，負責路由、請求解析（用 pydantic 驗證 JSON）與回應序列化。
 from fastapi import FastAPI
@@ -31,7 +33,7 @@ from . import policy
 from .config import Settings
 # InvalidImage：影像解碼或檢查失敗時丟出的例外，訊息本身就是錯誤碼（例如 "IMAGE_TOO_LARGE"），見 imaging.py。
 from .imaging import InvalidImage
-# load_models：從資料夾載入 YuNet、SFace、MiniFASNet 三組模型，見 models.py。
+# load_models：從資料夾載入 YuNet、SFace、MiniFASNet、MediaPipe Face Landmarker 四組模型，見 models.py。
 from .models import load_models
 # FaceVerifier：整個判定流程（偵測、動作挑戰、防偽、比對、政策判定），見 pipeline.py。
 from .pipeline import FaceVerifier
@@ -188,9 +190,29 @@ def create_app(settings: Settings | None = None, verifier: FaceVerifier | None =
     """
     # 沒有傳入 settings 就從環境變數讀（`a or b`：a 是 None 時取 b）。
     settings = settings or Settings.from_env()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        """服務的生命週期：啟動時什麼都不做（模型在下面就載入了），關閉時釋放模型資源。
+
+        參數：
+            _app：FastAPI app（沒用到）。
+
+        設計理由：
+            MediaPipe 的原生資源要明確關閉；等 Python 結束時才由垃圾回收關閉，log 會留下誤導的錯誤訊息。
+            verifier 是 create_app 的變數，這裡讀到的是關閉當下的值（模型沒載入時是 None）。
+        """
+        # yield 之前是啟動、之後是關閉。
+        yield
+        # 模型有載入才需要釋放。
+        if verifier is not None:
+            # 關閉 Face Landmarker 等需要明確釋放的資源。
+            verifier.close()
+
     # 建立 FastAPI app。docs_url、redoc_url、openapi_url 設成 None 會關掉自動產生的
     # Swagger UI（/docs）、ReDoc（/redoc）與 OpenAPI 規格（/openapi.json）：這是內部服務，不需要對外公開 API 文件。
-    app = FastAPI(title="人臉驗證 provider", docs_url=None, redoc_url=None, openapi_url=None)
+    # lifespan：服務關閉時釋放模型資源（見上面的 lifespan）。
+    app = FastAPI(title="人臉驗證 provider", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     # 掛上 ProviderBoundary middleware；FastAPI 會以 ProviderBoundary(下一層 app, settings=settings) 的方式建立它，
     # 讓每個請求都先經過 token 與大小檢查。
     app.add_middleware(ProviderBoundary, settings=settings)
@@ -198,7 +220,7 @@ def create_app(settings: Settings | None = None, verifier: FaceVerifier | None =
     if verifier is None:
         # 模型載入可能失敗（檔案不存在、檔案損毀、OpenCV／onnxruntime 讀不進來），用 try 包起來。
         try:
-            # load_models 讀取模型資料夾內的 YuNet、SFace、MiniFASNet 檔案；YuNet 的偵測信心門檻取自 policy。
+            # load_models 讀取模型資料夾內的 YuNet、SFace、MiniFASNet、Face Landmarker 檔案；YuNet 的偵測信心門檻取自 policy。
             # 再把載入好的模型交給 FaceVerifier，得到可以執行 verify 的物件。
             verifier = FaceVerifier(load_models(settings.model_dir, policy.DETECTION_SCORE_THRESHOLD))
         # 接住所有例外（Exception）：不論哪種載入失敗，都不讓服務啟動失敗。
