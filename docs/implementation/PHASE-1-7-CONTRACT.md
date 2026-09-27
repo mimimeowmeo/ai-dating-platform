@@ -43,9 +43,9 @@
 - API 將影像透過私有 HTTP 傳至 AI `/internal/ai/face/verify`，`X-Internal-Token` 驗證；JSON `{imageBase64,mimeType,requestId,referenceImages,liveCapture?}`。`referenceImages` 是身分參照：上述第一張主照片（固定 1 張，API 先縮到 800px 內、1 MiB 以內）。即時鏡頭時 `imageBase64` 是正面影格，`liveCapture` 是 `{challengeId,frames:[{action,imageBase64,mimeType}]}`（最多 3 張、每張 1 MiB）。回應 `{status,reasonCode,modelName,modelVersion,livenessScore?,faceMatchScore?}`。
 - 主照片從物件儲存讀取失敗時不呼叫 AI，記錄 `unavailable / REFERENCE_PHOTO_UNAVAILABLE`；縮到 800px 後短邊不到 64px（例如很寬的橫幅照）記錄 `unavailable / REFERENCE_PHOTO_TOO_SMALL`。兩者都不改變 `isVerified`。AI 服務拒收影像（HTTP 400）時記錄 `unavailable` 加上它回的錯誤碼（例如 `FRAME_IMAGE_TOO_LARGE`、`REFERENCE_INVALID_IMAGE`）。
 - 無設定的模型回 `unavailable / MODEL_NOT_CONFIGURED`，不得回 verified。
-- 自架 provider（`services/face`，預設不啟動，政策版本 3）：
+- 自架 provider（`services/face`，預設不啟動，政策版本 4）：
   - 只有上傳的自拍檔（沒有 `liveCapture`）無法證明是活人當下拍攝：比對不符、疑似翻拍、找不到臉回 `rejected`；全部通過也只回 `unavailable / LIVE_CAPTURE_REQUIRED`。
-  - 即時鏡頭：每張動作影格用 YuNet 的 5 個點重算頭部角度（在兩眼連線座標系計算，歪頭或轉照片不影響），和正面影格比較；動作沒做到、側傾變化超過 15°、或正面影格沒有正對鏡頭，回 `rejected / CHALLENGE_FAILED`；動作影格和正面不是同一人回 `FACE_CHANGED_DURING_CAPTURE`；動作影格的臉有問題回 `ACTION_*`。之後每張影格都做被動防偽，再做大頭貼比對，全部通過才回 `verified / VERIFICATION_PASSED`。
+  - 即時鏡頭：正面影格與每張動作影格用 MediaPipe Face Landmarker 重算頭部角度（和前端同一個模型檔、同一組點；在兩眼連線座標系計算，歪頭或轉照片不影響），和正面影格比較；動作沒做到、側傾變化超過 15°、正面影格沒有正對鏡頭、或 Face Landmarker 沒有剛好找到一張臉，回 `rejected / CHALLENGE_FAILED`（provider 另在 log 印一行子原因與變化量）；動作影格和正面不是同一人回 `FACE_CHANGED_DURING_CAPTURE`；動作影格的臉有問題回 `ACTION_*`。之後每張影格都做被動防偽，再做大頭貼比對，全部通過才回 `verified / VERIFICATION_PASSED`。
   - 主照片沒有臉、多張臉或臉太小回 `unavailable / REFERENCE_*`（問題在照片，不撤銷既有的驗證狀態）。
   - 動作挑戰只擋得住呈現攻擊（拿照片、螢幕、預錄影片對著鏡頭），擋不住繞過前端直接送出事先準備好的影格（注入攻擊）。
 - 只有 `verified`／`rejected` 會更新使用者的 `isVerified`；`unavailable`（未接模型、逾時、服務中斷）只寫入紀錄，不改變既有驗證狀態。寫入前在使用者鎖內確認大頭貼沒換過，換過就改記 `unavailable / AVATAR_CHANGED`。

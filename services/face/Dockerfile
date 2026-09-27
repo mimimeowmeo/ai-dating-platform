@@ -29,17 +29,18 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 # 放在安裝套件之後：只改工具程式時，上面安裝 torch 的那層可以沿用 Docker 快取，不必重裝。
 COPY services/face/tools ./tools
 # RUN：取得並準備模型檔，任一步失敗（例如 sha256 不符、轉檔前後輸出不一致）整個 build 就失敗。
-# 1. fetch_models.py 把四個模型檔下載到 downloads/，並驗證檔案大小與 sha256（網址鎖定在特定 commit）。
+# 1. fetch_models.py 把五個模型檔下載到 downloads/，並驗證檔案大小與 sha256（網址鎖定在特定 commit 或版本）。
 # 2. 建立 models/ 資料夾，存放最終要進執行期映像的模型。
-# 3. YuNet（人臉偵測）與 SFace（人臉特徵）本來就是 ONNX，直接搬到 models/。
+# 3. YuNet（人臉偵測）與 SFace（人臉特徵）本來就是 ONNX，MediaPipe Face Landmarker 是現成的 .task，直接搬到 models/。
 # 4. 進入 tools/ 執行 export_minifasnet.py：把 downloads/ 裡兩個 MiniFASNet 的 .pth 權重轉成 ONNX 寫到 models/，
 #    並檢查 onnxruntime 與 PyTorch 的輸出一致。
 RUN python tools/fetch_models.py downloads \
     && mkdir models \
-    && mv downloads/face_detection_yunet_2023mar.onnx downloads/face_recognition_sface_2021dec.onnx models/ \
+    && mv downloads/face_detection_yunet_2023mar.onnx downloads/face_recognition_sface_2021dec.onnx \
+          downloads/face_landmarker.task models/ \
     && cd tools && python export_minifasnet.py ../downloads ../models
 
-# 第二階段：執行期映像，只有 OpenCV、onnxruntime 與轉好的模型。
+# 第二階段：執行期映像，只有 OpenCV、onnxruntime、MediaPipe 與準備好的模型。
 # FROM：重新從乾淨的 python:3.12-slim 開始；第一階段裝的 torch 與下載暫存都不會帶過來。
 FROM python:3.12-slim
 
@@ -49,17 +50,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 # WORKDIR：執行期的工作目錄是 /app；程式預設的模型資料夾 /app/models 就在這裡（見 app/config.py）。
 WORKDIR /app
-# COPY：複製執行期的套件清單（FastAPI、uvicorn、OpenCV headless、onnxruntime 等，版本全部鎖定）。
-COPY services/face/requirements.txt ./requirements.txt
+# COPY：複製執行期的套件清單（FastAPI、uvicorn、OpenCV headless、onnxruntime 等，版本全部鎖定），
+# 以及要用 --no-deps 安裝的 MediaPipe（原因見 requirements-nodeps.txt）。
+COPY services/face/requirements.txt services/face/requirements-nodeps.txt ./
 # RUN：
-# - 安裝執行期套件（不留 pip 快取）。
+# - MediaPipe 的原生函式庫連結了 libEGL.so.1、libGLESv2.so.2、libGLdispatch.so.0，slim 映像沒有，載入時會失敗；
+#   推論只用 CPU（XNNPACK），不會真的呼叫 EGL，所以只需要這三個檔案存在。
+#   - libgles2（連帶 libglvnd0，提供 libGLdispatch）用 apt 正常安裝，只有幾百 KB。
+#   - libegl1 強制相依 Mesa（libegl-mesa0 → LLVM、Z3），會多出約 190 MB；所以只下載它的 .deb，
+#     用 dpkg-deb -x 解出 libEGL.so.1，不登記成已安裝的套件，也不裝 Mesa（apt 的相依狀態仍然完整）。
+#   - ldconfig 更新動態連結器的快取；最後刪掉 apt 的套件清單，減少映像大小。
+# - 安裝執行期套件（不留 pip 快取），再用 --no-deps 安裝 MediaPipe；它的必要相依套件已鎖在 requirements.txt。
 # - useradd 建立系統帳號 face（固定 UID 10001，並建立家目錄），後面用這個非 root 帳號執行服務，
 #   萬一服務被攻破，攻擊者也不會拿到容器內的 root 權限。
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgles2 \
+    && cd /tmp && apt-get download libegl1 && dpkg-deb -x libegl1_*.deb / && rm libegl1_*.deb && cd /app \
+    && ldconfig \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --no-deps -r requirements-nodeps.txt \
     && useradd --system --uid 10001 --create-home face
-# COPY --from=models：從第一階段只複製轉好的模型資料夾（YuNet、SFace 與兩個 MiniFASNet 的 ONNX）到 /app/models。
+# COPY --from=models：從第一階段只複製準備好的模型資料夾（YuNet、SFace、兩個 MiniFASNet 的 ONNX 與 Face Landmarker）到 /app/models。
 COPY --from=models /build/models ./models
-# COPY：複製第三方授權全文（YuNet、SFace、Silent-Face-Anti-Spoofing 的授權），讓授權聲明隨映像一起散布。
+# COPY：複製第三方授權全文（YuNet、SFace、Silent-Face-Anti-Spoofing、MediaPipe 的授權），讓授權聲明隨映像一起散布。
 COPY services/face/third_party ./third_party
 # COPY --chown=face:face：複製 provider 程式碼到 /app/app，並把檔案擁有者設成 face 帳號。
 # 程式碼最常變動，放在最後複製，改程式時前面的層（安裝套件、模型）都能沿用快取。

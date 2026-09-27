@@ -3,6 +3,7 @@
 !services/face/
 !services/face/requirements.txt
 !services/face/requirements-export.txt
+!services/face/requirements-nodeps.txt
 !services/face/app/
 !services/face/app/*.py
 !services/face/tools/

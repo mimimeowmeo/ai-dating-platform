@@ -4,11 +4,11 @@
 LFS pointer，要用 media.githubusercontent.com 才是真正的二進位檔。
 
 這支腳本在整個人臉驗證服務裡的位置：
-- services/face 執行期需要三種模型：YuNet（人臉偵測，.onnx）、SFace（人臉特徵，.onnx）、
-  MiniFASNet（被動防偽，上游只提供 PyTorch 的 .pth 權重）。
+- services/face 執行期需要四種模型：YuNet（人臉偵測，.onnx）、SFace（人臉特徵，.onnx）、
+  MiniFASNet（被動防偽，上游只提供 PyTorch 的 .pth 權重）、MediaPipe Face Landmarker（頭部角度，.task）。
 - Dockerfile 的第一階段（`FROM python:3.12-slim AS models`）執行
-  `python tools/fetch_models.py downloads`，把四個檔案下載到 downloads/；
-  接著把兩個 .onnx 搬到 models/，再由 export_minifasnet.py 把兩個 .pth 轉成 ONNX 放進 models/。
+  `python tools/fetch_models.py downloads`，把五個檔案下載到 downloads/；
+  接著把兩個 .onnx 與 .task 搬到 models/，再由 export_minifasnet.py 把兩個 .pth 轉成 ONNX 放進 models/。
 - 第二階段（執行期映像）只複製 models/，所以這支腳本與下載的原始檔都不會出現在正式執行的容器裡。
 
 為什麼要鎖 commit、檢查大小與 sha256：
@@ -44,6 +44,8 @@ SILENT_FACE = (
     # 第二段：鎖定的 commit hash（b6d5f04…）加上權重資料夾路徑。
     "b6d5f04ad78778917853b25c778acef6d5626d15/resources/anti_spoof_models"
 )
+# MediaPipe 模型庫的網址；路徑裡的 float16/1 是模型的精度與版本號，Google 發布後不會再改內容。
+MEDIAPIPE_MODELS = "https://storage.googleapis.com/mediapipe-models"
 
 # (檔名, 網址, 位元組數, sha256)
 # 要下載的檔案清單。用 tuple（不可變的序列）而不是 list，表示這是固定設定、執行中不會被改動。
@@ -92,6 +94,19 @@ FILES = (
         1_856_130,
         # 預期的 sha256。
         "84ee1d37d96894d5e82de5a57df044ef80a58be2b218b5ed7cdfd875ec2f5990",
+    ),
+    # MediaPipe Face Landmarker 模型包（人臉偵測 + 478 個臉部點 + 表情係數，三個模型都是 Apache-2.0）。
+    # 必須和前端 apps/web/scripts/prepare-mediapipe.mjs 鎖定同一個檔案（網址、大小、sha256 都相同），
+    # 前端與伺服器量到的頭部角度才能互相比較；更新時兩邊要一起改。
+    (
+        # 存檔用的檔名，也是 app/models.py 載入時使用的檔名。
+        "face_landmarker.task",
+        # 下載網址。
+        f"{MEDIAPIPE_MODELS}/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        # 預期的檔案大小（位元組）。
+        3_758_596,
+        # 預期的 sha256。
+        "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
     ),
 )
 

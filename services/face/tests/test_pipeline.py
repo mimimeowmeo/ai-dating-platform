@@ -53,7 +53,7 @@ class DecisionTests(unittest.TestCase):
         """規則：只有上傳的自拍檔（沒有 liveCapture）時，就算全部檢查通過，也只能回 unavailable。
 
         為什麼重要：上傳的照片可能是事先拍好、或別人的照片，無法證明是活人「當下」拍的；
-        只有即時鏡頭的動作挑戰通過才能回 verified（policy 版本 3 的核心規則）。
+        只有即時鏡頭的動作挑戰通過才能回 verified（policy 版本 3 起的核心規則）。
         """
         # 預設情境：自拍與主照片各一張臉、防偽判定真人、相似度 0.8（高於門檻 0.363）。
         result = run(similarity=0.8)

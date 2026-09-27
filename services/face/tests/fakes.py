@@ -4,15 +4,16 @@
 
 1. 產生「合法格式」的請求 payload（真的 JPEG／PNG／WEBP 影像再轉 base64），
    讓請求能通過 app/schemas.py 的 pydantic 驗證與 app/imaging.py 的解碼檢查。
-2. 用假的模型取代真正的 YuNet（人臉偵測）、SFace（人臉特徵）、MiniFASNet（被動防偽）。
+2. 用假的模型取代真正的 YuNet（人臉偵測）、SFace（人臉特徵）、MiniFASNet（被動防偽）、
+   MediaPipe Face Landmarker（頭部角度）。
 
 為什麼要用假模型：
 - 真模型需要下載 ONNX 模型檔與安裝 OpenCV／onnxruntime，單元測試不應依賴這些大型檔案。
 - 真模型對「純色影像」根本偵測不到臉，無法精準製造「剛好一張臉」「兩張臉」「臉太小」等情境。
 - 假模型可以「指定」每次呼叫要回傳什麼，所以能精準測試 app/pipeline.py 的判定邏輯與邊界值。
 
-app/pipeline.py 只透過 app/models.py 的 Models（detector／embedder／spoof 三個欄位）呼叫
-detect()、embed()、assess() 三個方法；Python 是鴨子型別（duck typing），只要物件有同名方法、
+app/pipeline.py 只透過 app/models.py 的 Models（detector／embedder／spoof／landmarker 四個欄位）呼叫
+detect()、embed()、assess()、locate() 四個方法；Python 是鴨子型別（duck typing），只要物件有同名方法、
 回傳值形狀相同，就能直接替換，不需要繼承真正的模型類別。
 """
 
@@ -26,8 +27,8 @@ import numpy as np
 # PIL（Pillow）：Python 的影像處理函式庫，這裡用來憑空產生一張純色的測試影像。
 from PIL import Image
 
-# Face：一張臉的偵測結果；Models：三個模型的容器；SpoofResult：防偽判定結果。
-from app.models import Face, Models, SpoofResult
+# Face：一張臉的偵測結果；FacePoints：算頭部角度的 5 個臉部位置；Models：四個模型的容器；SpoofResult：防偽判定結果。
+from app.models import Face, FacePoints, Models, SpoofResult
 # FaceVerifier：真正要被測試的判定流程（pipeline），測試只替換掉它底下的模型。
 from app.pipeline import FaceVerifier
 
@@ -114,6 +115,8 @@ def verify_request(references=1, size=(128, 128), actions=None):
 def face(x=10.0, y=10.0, w=100.0, h=100.0, yaw=0.0, pitch=0.5, roll=0.0):
     """假的 YuNet 偵測結果；yaw、pitch 決定 5 個臉部點的位置，算法和 app/pose.py 相反。
 
+    同一個 Face 也可以交給 FakeLandmarker，當作 Face Landmarker 在同一張影像找到的臉（見 points）。
+
     兩眼在 (40, 50)、(60, 50)（距離 20），嘴角在 y=80（和兩眼中點相距 30），
     所以鼻尖放在 (50 + yaw×20, 50 + pitch×30)，pose.head_pose 就會算回同樣的 yaw、pitch。
 
@@ -163,6 +166,84 @@ def face(x=10.0, y=10.0, w=100.0, h=100.0, yaw=0.0, pitch=0.5, roll=0.0):
     row[14] = 0.95
     # 包成 Face 物件回傳：box 用傳入的原始數值（Python float），row 是完整的 15 個值，score 同 row[14]。
     return Face(box=(x, y, w, h), row=row, score=0.95)
+
+
+def points(face):
+    """把假臉（fakes.face() 的結果）的 5 個臉部點轉成 FacePoints，當作 Face Landmarker 找到的位置。
+
+    參數：
+        face：fakes.face() 建立的 Face；row 的第 4～13 個值依序是右眼、左眼、鼻尖、右嘴角、左嘴角。
+
+    回傳：
+        FacePoints：同樣 5 個位置；pose.head_pose 會算回 face() 指定的 yaw、pitch、roll。
+
+    設計理由：
+        測試原本就用 face(yaw=..., pitch=...) 控制頭部角度；讓 YuNet 與 Face Landmarker 的假結果
+        共用同一個 Face，每個測試只要寫一次角度。
+    """
+    # 取出 5 個臉部點：row[4:14] 是 10 個數字，reshape 成 5 列 (x, y)。
+    xy = face.row[4:14].reshape(5, 2)
+    # 依序對應到 FacePoints 的 5 個欄位；轉成 Python float 的 tuple。
+    right_eye, left_eye, nose, mouth_right, mouth_left = (tuple(float(v) for v in pair) for pair in xy)
+    # 組成 FacePoints 回傳。
+    return FacePoints(right_eye=right_eye, left_eye=left_eye, nose=nose, mouth_right=mouth_right, mouth_left=mouth_left)
+
+
+class FakeLandmarker:
+    """假的 Face Landmarker（取代 MediaPipeLandmarker），依呼叫順序回傳預先指定的臉。
+
+    pipeline 呼叫 locate() 的順序固定是（只有即時鏡頭才會呼叫）：
+        第 1 次：正面影格
+        第 2 次起：每張動作影格（通過 YuNet 的臉部檢查之後才會呼叫）
+
+    建構參數：
+        *results：每次呼叫要回傳的臉，每個結果是 list[Face]（用 fakes.face() 建立，會經 points 轉成 FacePoints），
+            空清單代表找不到臉，兩個以上代表多張臉。
+
+    屬性：
+        results：還沒用掉的結果清單。
+        shapes：每次呼叫時收到的影像 shape，讓測試檢查量角度用的是原始大小的影格。
+        closed：close() 有沒有被呼叫過。
+
+    設計理由：
+        和 FakeDetector 一樣依順序彈出；呼叫次數超過準備的結果時 pop 會丟出 IndexError，
+        也能抓出「上傳自拍卻去量角度」這種多餘的呼叫（verifier() 預設給一個沒有結果的 FakeLandmarker）。
+    """
+
+    def __init__(self, *results):
+        """保存要依序回傳的結果，並建立空的呼叫紀錄。
+
+        參數：
+            *results：見類別說明；可以一個都不給（代表預期 locate 完全不會被呼叫）。
+        """
+        # *results 收到的是 tuple，轉成 list 才能用 pop 逐一取出。
+        self.results = list(results)
+        # 記錄每次呼叫時的影像 shape，一開始是空的。
+        self.shapes = []
+        # 還沒被關閉。
+        self.closed = False
+
+    def locate(self, image):
+        """模擬 MediaPipeLandmarker.locate：記錄影像 shape，回傳下一個預先指定的臉（轉成 FacePoints）。
+
+        參數：
+            image：pipeline 傳入的 BGR 影像。
+
+        回傳：
+            list[FacePoints]。
+
+        可能丟出的錯誤：
+            結果已經用完時，list.pop 丟出 IndexError。
+        """
+        # 記下這次收到的影像形狀。
+        self.shapes.append(image.shape)
+        # 取出（並移除）最前面的結果，每張假臉轉成 FacePoints。
+        return [points(face) for face in self.results.pop(0)]
+
+    def close(self):
+        """模擬 MediaPipeLandmarker.close：只記錄有被呼叫。"""
+        # 標記為已關閉。
+        self.closed = True
 
 
 class FakeDetector:
@@ -348,7 +429,7 @@ class FakeSpoof:
         return self.sequence.pop(0) if self.sequence else self.result
 
 
-def verifier(detector=None, similarity=0.8, spoof=None, embedder=None):
+def verifier(detector=None, similarity=0.8, spoof=None, embedder=None, landmarker=None):
     """建立一個使用假模型的 FaceVerifier（真正的判定流程），方便每個測試只替換需要的部分。
 
     參數：
@@ -357,6 +438,7 @@ def verifier(detector=None, similarity=0.8, spoof=None, embedder=None):
             預設 0.8，高於 policy.MATCH_THRESHOLD（0.363），代表同一人。
         spoof：假防偽模型；沒給時預設真人（real_probability 0.9、is_real True）。
         embedder：假特徵模型；有給時 similarity 參數不會被使用。
+        landmarker：假 Face Landmarker；沒給時是沒有任何結果的 FakeLandmarker（只上傳自拍的流程不會用到它）。
 
     回傳：
         FaceVerifier：模型全是假的，但判定邏輯是真的，可以直接呼叫 verify()。
@@ -365,7 +447,7 @@ def verifier(detector=None, similarity=0.8, spoof=None, embedder=None):
         預設值組合起來是「所有檢查都通過」的情境；每個測試只改一個條件，就能確認
         「單一條件不符」會得到對應的 reasonCode。
     """
-    # 用 Models 容器包住三個假模型，交給 FaceVerifier；
+    # 用 Models 容器包住四個假模型，交給 FaceVerifier；
     # Models 的型別註記寫的是真模型類別，但 Python 執行時不檢查型別，假物件只要方法相同就能用。
     return FaceVerifier(Models(
         # `a or b`：a 是 None 時使用 b。預設偵測器準備兩次結果：第 1 次（自拍）與第 2 次（主照片）各一張正常的臉。
@@ -374,4 +456,6 @@ def verifier(detector=None, similarity=0.8, spoof=None, embedder=None):
         embedder=embedder or FakeEmbedder(similarity),
         # 預設防偽模型：判定為真人。
         spoof=spoof or FakeSpoof(),
+        # 預設 Face Landmarker：沒有準備結果，被呼叫就會丟出 IndexError。
+        landmarker=landmarker or FakeLandmarker(),
     ))

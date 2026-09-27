@@ -1,4 +1,4 @@
-"""用 YuNet 的 5 個臉部點估算頭部轉動，判斷動作挑戰有沒有做到。
+"""用 MediaPipe Face Landmarker 的 5 個臉部位置估算頭部轉動，判斷動作挑戰有沒有做到。
 
 背景：
     即時鏡頭驗證時，前端會要求使用者做指定動作（turn_left／turn_right／look_up／look_down），
@@ -7,6 +7,8 @@
     這可以擋掉「拿一張靜態照片對著鏡頭」的攻擊：靜態照片無法依指示轉頭。
 
 算法（和前端 apps/web/lib/head-pose.ts 相同，兩邊的數字才能互相比較）：
+    兩邊用同一個 Face Landmarker 模型檔、同一組點索引（見 models.py 的 MEDIAPIPE_* 常數）。
+    policy 版本 3 以前伺服器改用 YuNet 的 5 個點，和前端量到的變化量對不上，常把有做動作的人判成失敗。
     不是真正的 3D 角度，而是用 5 個 2D 臉部點算出的「相對比例」，不受臉在畫面中大小影響。
     先把座標轉到「兩眼連線」座標系，再算比例，所以頭部側傾（roll）或整張照片在畫面平面內旋轉，都不會改變 yaw／pitch：
       u（橫軸）= 兩眼連線方向的單位向量，固定指向畫面右側（x 分量 ≥ 0）
@@ -32,8 +34,8 @@ from dataclasses import dataclass
 # policy：判定政策模組，所有門檻（YAW_CHANGE_THRESHOLD、PITCH_CHANGE_THRESHOLD）集中在那裡。
 # 前面的「.」代表從同一個套件（services/face/app）匯入。
 from . import policy
-# Face：models.py 定義的偵測結果，裡面的 row 是 YuNet 原始輸出的 15 個數值。
-from .models import Face
+# FacePoints：models.py 從 Face Landmarker 結果整理出的 5 個臉部位置（像素座標）。
+from .models import FacePoints
 
 
 # frozen=True：建立後欄位不能再修改（不可變），避免計算結果在傳遞過程中被意外改寫。
@@ -59,13 +61,11 @@ class HeadPose:
     roll: float = 0.0
 
 
-def head_pose(face: Face) -> HeadPose | None:
-    """用 YuNet 的 5 個臉部點算出 yaw、pitch 與 roll。
+def head_pose(points: FacePoints) -> HeadPose | None:
+    """用 5 個臉部位置算出 yaw、pitch 與 roll。
 
     參數：
-        face: YuNet 的偵測結果。face.row 是 15 個 float32，依 OpenCV FaceDetectorYN 文件的順序：
-            [0–3] 臉框 x, y, w, h；[4–5] 右眼 x, y；[6–7] 左眼 x, y；[8–9] 鼻尖 x, y；
-            [10–11] 右嘴角 x, y；[12–13] 左嘴角 x, y；[14] 偵測信心分數。
+        points: Face Landmarker 找到的一張臉的兩眼、鼻尖、兩個嘴角（像素座標，見 models.FacePoints）。
 
     回傳：
         HeadPose；若臉部點的位置異常（兩眼幾乎重疊，或嘴角中點沿縱軸沒有低於兩眼中點至少 1 px），
@@ -76,12 +76,10 @@ def head_pose(face: Face) -> HeadPose | None:
         先轉到兩眼連線座標系，頭部側傾或照片在畫面平面內旋轉都不會改變 yaw／pitch，
         否則把一張靜態照片轉約 20° 就能讓 yaw 變化超過門檻。橫軸固定指向畫面右側，左右眼互換也不影響結果。
     """
-    # 取出 YuNet 對這張臉的原始 15 個輸出值（numpy 陣列）。
-    row = face.row
-    # 依索引取出右眼、左眼、鼻尖的 (x, y) 座標，各組成一個 tuple。
-    right_eye, left_eye, nose = (row[4], row[5]), (row[6], row[7]), (row[8], row[9])
+    # 取出右眼、左眼、鼻尖的 (x, y) 座標。
+    right_eye, left_eye, nose = points.right_eye, points.left_eye, points.nose
     # 取出右嘴角與左嘴角的 (x, y) 座標。
-    mouth_right, mouth_left = (row[10], row[11]), (row[12], row[13])
+    mouth_right, mouth_left = points.mouth_right, points.mouth_left
     # 兩眼中點 = 兩眼 x 的平均、y 的平均；作為 yaw 與 pitch 的共同基準點。
     eye_mid = ((right_eye[0] + left_eye[0]) / 2, (right_eye[1] + left_eye[1]) / 2)
     # 兩個嘴角的中點。
@@ -94,7 +92,7 @@ def head_pose(face: Face) -> HeadPose | None:
     if eye_distance < 1:
         # 無法估算頭部角度。
         return None
-    # 讓橫軸固定指向畫面右側：不管 YuNet 把哪一隻眼標成「右眼」，結果都一樣（和舊公式一樣不受左右眼互換影響）。
+    # 讓橫軸固定指向畫面右側：不管哪一隻眼被標成「右眼」，結果都一樣（和舊公式一樣不受左右眼互換影響）。
     if axis_x < 0:
         # 反轉向量方向。
         axis_x, axis_y = -axis_x, -axis_y
@@ -110,7 +108,7 @@ def head_pose(face: Face) -> HeadPose | None:
     if eye_to_mouth < 1:
         # 無法估算頭部角度。
         return None
-    # 建立並回傳 HeadPose。float(...) 把 numpy 的數值型別轉成 Python 原生 float，方便後續比較與序列化。
+    # 建立並回傳 HeadPose。float(...) 確保是 Python 原生 float（假資料可能是 numpy 數值），方便後續比較與序列化。
     return HeadPose(
         # yaw：d 在橫軸上的分量，除以兩眼距離做正規化。
         yaw=float((dx * ux + dy * uy) / eye_distance),
@@ -139,8 +137,8 @@ def facing_camera(pose: HeadPose) -> bool:
     return abs(pose.yaw) <= policy.NEUTRAL_MAX_YAW and abs(pose.roll) <= policy.NEUTRAL_MAX_ROLL_DEGREES
 
 
-def action_performed(action: str, neutral: HeadPose, pose: HeadPose) -> bool:
-    """判斷某張動作影格是否做到指定動作。
+def action_problem(action: str, neutral: HeadPose, pose: HeadPose) -> str | None:
+    """判斷某張動作影格是否做到指定動作；沒做到時回傳原因。
 
     參數：
         action: 動作名稱，"turn_left"、"turn_right"、"look_up" 或 "look_down"（和 policy.CHALLENGE_ACTIONS 相同）。
@@ -148,8 +146,10 @@ def action_performed(action: str, neutral: HeadPose, pose: HeadPose) -> bool:
         pose: 這張動作影格的頭部角度。
 
     回傳：
-        側傾變化在 MAX_ROLL_CHANGE_DEGREES 以內、變化量朝正確方向、且大小達到 policy 門檻時回傳 True；否則 False。
-        不認得的動作名稱一律回傳 False（fail closed：有疑問就不通過）。
+        做到了回傳 None；沒做到回傳原因（只寫進診斷 log，對外的 reasonCode 一律是 CHALLENGE_FAILED）：
+        - "ROLL_CHANGED"：側傾變化超過 MAX_ROLL_CHANGE_DEGREES。
+        - "INSUFFICIENT"：變化量沒有朝正確方向達到門檻（方向相反也算這種，看 log 裡變化量的正負號即可分辨）。
+        - "UNKNOWN_ACTION"：不認得的動作名稱（fail closed：有疑問就不通過）。
 
     設計理由：
         比較「變化量」而不是絕對值，抵銷每個人五官比例與拍攝角度的差異。
@@ -157,27 +157,27 @@ def action_performed(action: str, neutral: HeadPose, pose: HeadPose) -> bool:
     """
     # 側傾變化太大：可能是在畫面平面內轉動照片，而不是轉頭，一律不算做到。
     if abs(pose.roll - neutral.roll) > policy.MAX_ROLL_CHANGE_DEGREES:
-        # 沒做到。
-        return False
+        # 沒做到：側傾變化太大。
+        return "ROLL_CHANGED"
     # 左右轉頭的變化量：動作影格減正面影格。正值代表鼻尖在畫面上往右移（使用者往自己的左邊轉）。
     yaw_change = pose.yaw - neutral.yaw
     # 抬頭低頭的變化量：負值代表鼻尖相對往上（抬頭），正值代表往下（低頭）。
     pitch_change = pose.pitch - neutral.pitch
-    # 往自己的左邊轉頭。
-    if action == "turn_left":
-        # yaw 至少要增加門檻值。
-        return yaw_change >= policy.YAW_CHANGE_THRESHOLD
-    # 往自己的右邊轉頭。
-    if action == "turn_right":
-        # yaw 至少要減少門檻值（變化量 ≤ 負的門檻）。
-        return yaw_change <= -policy.YAW_CHANGE_THRESHOLD
-    # 抬頭。
-    if action == "look_up":
-        # pitch 至少要減少門檻值。
-        return pitch_change <= -policy.PITCH_CHANGE_THRESHOLD
-    # 低頭。
-    if action == "look_down":
-        # pitch 至少要增加門檻值。
-        return pitch_change >= policy.PITCH_CHANGE_THRESHOLD
+    # 每個動作要求的方向與門檻：往自己的左邊轉 yaw 至少增加門檻值、往右轉至少減少門檻值，
+    # 抬頭 pitch 至少減少門檻值、低頭至少增加門檻值。
+    reached = {
+        # 往自己的左邊轉頭。
+        "turn_left": yaw_change >= policy.YAW_CHANGE_THRESHOLD,
+        # 往自己的右邊轉頭（變化量 ≤ 負的門檻）。
+        "turn_right": yaw_change <= -policy.YAW_CHANGE_THRESHOLD,
+        # 抬頭。
+        "look_up": pitch_change <= -policy.PITCH_CHANGE_THRESHOLD,
+        # 低頭。
+        "look_down": pitch_change >= policy.PITCH_CHANGE_THRESHOLD,
+    }
     # 未知的動作：保守地判定為沒做到。實際上 schemas.py 的 Action 型別已限制只能是上面四種，這裡是額外保險。
-    return False
+    if action not in reached:
+        # 沒做到：不認得的動作。
+        return "UNKNOWN_ACTION"
+    # 做到了回傳 None，否則是變化量不夠（或方向相反）。
+    return None if reached[action] else "INSUFFICIENT"

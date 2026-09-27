@@ -1,19 +1,27 @@
 """即時鏡頭（liveCapture，動作挑戰）的單元測試。
 
 測試範圍：
-- PoseTests：app/pose.py 用 YuNet 的 5 個臉部點算頭部角度（yaw 左右轉、pitch 抬低頭），
+- PoseTests：app/pose.py 用 Face Landmarker 的 5 個臉部位置算頭部角度（yaw 左右轉、pitch 抬低頭），
   以及判斷某個動作有沒有做到（和正面影格相比的變化量是否超過 policy 的門檻）。
 - LiveDecisionTests：app/pipeline.py 在有 liveCapture 時的判定：
   每張動作影格都要剛好一張夠大的臉、做到指定動作、和正面影格是同一人，
-  之後仍要通過被動防偽與大頭貼比對，全部通過才回 verified／VERIFICATION_PASSED。
+  之後仍要通過被動防偽與大頭貼比對，全部通過才回 verified／VERIFICATION_PASSED；
+  動作挑戰沒過時要在 log 印一行診斷資料。
 
 為什麼這些規則重要：上傳的照片無法證明是活人當下拍的；要求使用者即時做出隨機指定的轉頭／抬頭動作，
 並確認整段拍攝都是同一個人，才能降低拿照片或別人代拍冒用的風險。
 
-所有模型都用 tests/fakes.py 的假模型；頭部角度由 fakes.face(yaw=..., pitch=...) 精準控制。
+所有模型都用 tests/fakes.py 的假模型；頭部角度由 fakes.face(yaw=..., pitch=...) 精準控制，
+同一張假臉同時交給 FakeDetector（YuNet）與 FakeLandmarker（Face Landmarker）。
 執行方式（在 services/face 目錄下）：python -m unittest tests.test_live
 """
 
+# contextlib.redirect_stdout：暫時把 print 的輸出導到別的地方，用來讀診斷 log。
+import contextlib
+# io.StringIO：記憶體中的文字緩衝區，接住 redirect_stdout 導過來的輸出。
+import io
+# json：解析診斷 log 的那一行 JSON。
+import json
 # unittest：Python 內建的測試框架。
 import unittest
 
@@ -21,13 +29,13 @@ import unittest
 from app import policy
 # InvalidImage：影像解碼失敗時丟出的例外，錯誤碼就是例外訊息。
 from app.imaging import InvalidImage
-# HeadPose：頭部角度（yaw、pitch）；action_performed：判斷動作是否做到；head_pose：從臉部點算出角度。
-from app.pose import HeadPose, action_performed, head_pose
+# HeadPose：頭部角度（yaw、pitch）；action_problem：動作沒做到的原因；head_pose：從臉部點算出角度。
+from app.pose import HeadPose, action_problem, head_pose
 # VerifyRequest：/verify 請求的 pydantic 模型。
 from app.schemas import VerifyRequest
 
 # 共用的假模型與假資料工具，說明見 tests/fakes.py。
-from tests.fakes import FakeDetector, FakeEmbedder, FakeSpoof, face, verifier, verify_request
+from tests.fakes import FakeDetector, FakeEmbedder, FakeLandmarker, FakeSpoof, face, points, verifier, verify_request
 
 # 左右轉頭的門檻（yaw 變化量，目前是 0.12），取短名稱讓下面的測試比較好讀。
 YAW = policy.YAW_CHANGE_THRESHOLD
@@ -38,7 +46,7 @@ PITCH = policy.PITCH_CHANGE_THRESHOLD
 def run_live(actions, frame_faces, frame_similarities=None, similarity=0.8, spoof=None):
     """跑一次即時鏡頭驗證：正面影格的臉是 face()，每張動作影格的偵測結果由 frame_faces 指定。
 
-    主照片的臉也是 face()（正常、夠大的一張臉）。
+    主照片的臉也是 face()（正常、夠大的一張臉）。YuNet 與 Face Landmarker 在每張影格找到同樣的臉。
 
     參數：
         actions：動作清單，例如 ["turn_left", "look_up"]；每個動作會產生一張動作影格。
@@ -59,21 +67,42 @@ def run_live(actions, frame_faces, frame_similarities=None, similarity=0.8, spoo
     embedder = FakeEmbedder(similarity, frame_similarities)
     # 組出帶有 liveCapture 的請求，並用 pydantic 驗證、轉成請求物件。
     request = VerifyRequest(**verify_request(actions=actions))
+    # Face Landmarker 依呼叫順序回傳：正面影格一張正常臉，之後每張動作影格和 YuNet 找到的一樣。
+    landmarker = FakeLandmarker([face()], *frame_faces)
     # 用假模型跑完整流程並回傳結果。
-    return verifier(detector=detector, embedder=embedder, spoof=spoof).verify(request)
+    return verifier(detector=detector, embedder=embedder, spoof=spoof, landmarker=landmarker).verify(request)
+
+
+def captured(run):
+    """執行 run()，回傳 (結果, 期間印出的每一行 log)。
+
+    參數：
+        run：不帶參數的函式，例如 lambda: run_live(...)。
+
+    回傳：
+        (run 的回傳值, 印出的文字切成的行清單)。
+    """
+    # 建立記憶體緩衝區接住輸出。
+    output = io.StringIO()
+    # 執行期間 print 都寫進緩衝區，不會出現在測試畫面。
+    with contextlib.redirect_stdout(output):
+        # 執行並保存結果。
+        result = run()
+    # 回傳結果與每一行輸出。
+    return result, output.getvalue().splitlines()
 
 
 class PoseTests(unittest.TestCase):
     """app/pose.py 的測試：頭部角度的計算，以及動作是否做到的判斷。"""
 
-    def test_head_pose_reads_yunet_landmarks(self):
-        """規則：head_pose 從 YuNet 的 5 個臉部點算回正確的 yaw、pitch。
+    def test_head_pose_reads_face_points(self):
+        """規則：head_pose 從 5 個臉部位置算回正確的 yaw、pitch。
 
         為什麼重要：動作挑戰完全依賴這個角度；fakes.face() 用和 pose.py 相反的算法放置臉部點，
-        這裡確認兩邊的定義一致（也間接確認臉部點在 YuNet 輸出中的位置沒讀錯）。
+        這裡確認兩邊的定義一致（也確認 fakes.points 把 5 個點對應到正確的欄位）。
         """
-        # 建一張 yaw=0.2、pitch=0.4 的假臉，再用 head_pose 算回角度。
-        pose = head_pose(face(yaw=0.2, pitch=0.4))
+        # 建一張 yaw=0.2、pitch=0.4 的假臉，轉成 FacePoints，再用 head_pose 算回角度。
+        pose = head_pose(points(face(yaw=0.2, pitch=0.4)))
         # yaw 要算回 0.2；臉部點存成 float32，精度有限，所以比到小數第 5 位即可。
         self.assertAlmostEqual(pose.yaw, 0.2, places=5)
         # pitch 要算回 0.4，同樣比到小數第 5 位。
@@ -85,7 +114,7 @@ class PoseTests(unittest.TestCase):
         為什麼重要：yaw／pitch 要只反映「轉頭、抬頭」，不能被歪頭或轉照片影響，否則靜態照片轉一下就能冒充轉頭。
         """
         # 同一張 yaw=0.2、pitch=0.4 的假臉，旋轉 25°。
-        pose = head_pose(face(yaw=0.2, pitch=0.4, roll=25))
+        pose = head_pose(points(face(yaw=0.2, pitch=0.4, roll=25)))
         # yaw、pitch 和沒旋轉時相同（float32 精度，比到小數第 4 位）。
         self.assertAlmostEqual(pose.yaw, 0.2, places=4)
         self.assertAlmostEqual(pose.pitch, 0.4, places=4)
@@ -93,13 +122,15 @@ class PoseTests(unittest.TestCase):
         self.assertAlmostEqual(pose.roll, 25, places=3)
 
     def test_roll_change_limits_actions(self):
-        """規則：動作影格和正面影格的側傾差超過 MAX_ROLL_CHANGE_DEGREES 時，一律不算做到動作。"""
+        """規則：動作影格和正面影格的側傾差超過 MAX_ROLL_CHANGE_DEGREES 時，一律不算做到動作（原因 ROLL_CHANGED）。"""
         # 正面：沒有側傾。
         neutral = HeadPose(yaw=0.0, pitch=0.5, roll=0.0)
         # 轉頭量足夠、側傾差剛好在上限內：算做到。
-        self.assertTrue(action_performed("turn_left", neutral, HeadPose(YAW * 1.5, 0.5, policy.MAX_ROLL_CHANGE_DEGREES)))
-        # 側傾差超過上限：不算做到。
-        self.assertFalse(action_performed("turn_left", neutral, HeadPose(YAW * 1.5, 0.5, policy.MAX_ROLL_CHANGE_DEGREES + 1)))
+        self.assertIsNone(action_problem("turn_left", neutral, HeadPose(YAW * 1.5, 0.5, policy.MAX_ROLL_CHANGE_DEGREES)))
+        # 側傾差超過上限：不算做到，原因是側傾變化太大。
+        self.assertEqual(
+            action_problem("turn_left", neutral, HeadPose(YAW * 1.5, 0.5, policy.MAX_ROLL_CHANGE_DEGREES + 1)), "ROLL_CHANGED"
+        )
 
     def test_degenerate_landmarks_have_no_pose(self):
         """規則：臉部點退化（例如全部擠在同一點）時，head_pose 回傳 None，而不是算出奇怪的數字。
@@ -113,7 +144,7 @@ class PoseTests(unittest.TestCase):
         # （Face 是 frozen dataclass，不能換掉 row 欄位本身，但 numpy 陣列的內容仍可以修改。）
         flat.row[4:14] = 0
         # 退化的臉部點必須得到 None。
-        self.assertIsNone(head_pose(flat))
+        self.assertIsNone(head_pose(points(flat)))
 
     def test_action_directions(self):
         """規則：四種動作各自對應正確的角度變化方向。
@@ -147,12 +178,12 @@ class PoseTests(unittest.TestCase):
         for action, (done, opposite) in cases.items():
             # 用 subTest 分開標示每個動作，某個失敗時其他仍會繼續跑。
             with self.subTest(action=action):
-                # 做到動作：必須回 True。
-                self.assertTrue(action_performed(action, neutral, done))
-                # 做反方向：必須回 False。
-                self.assertFalse(action_performed(action, neutral, opposite))
-                # 完全沒動（和正面影格一樣）：必須回 False。
-                self.assertFalse(action_performed(action, neutral, neutral))
+                # 做到動作：沒有原因（None）。
+                self.assertIsNone(action_problem(action, neutral, done))
+                # 做反方向：變化量不夠（反方向也歸在這一類）。
+                self.assertEqual(action_problem(action, neutral, opposite), "INSUFFICIENT")
+                # 完全沒動（和正面影格一樣）：變化量不夠。
+                self.assertEqual(action_problem(action, neutral, neutral), "INSUFFICIENT")
 
     def test_threshold_is_relative_to_neutral(self):
         """規則：門檻比的是「和正面影格相比的變化量」，不是動作影格的絕對角度。
@@ -164,9 +195,9 @@ class PoseTests(unittest.TestCase):
         # 正面影格的 yaw 是 0.1（本來就偏一點）。
         neutral = HeadPose(yaw=0.1, pitch=0.5)
         # 變化量只有門檻的 0.9 倍：雖然絕對值 0.1 + 0.108 已超過門檻 0.12，仍然不算做到。
-        self.assertFalse(action_performed("turn_left", neutral, HeadPose(0.1 + YAW * 0.9, 0.5)))
+        self.assertEqual(action_problem("turn_left", neutral, HeadPose(0.1 + YAW * 0.9, 0.5)), "INSUFFICIENT")
         # 變化量是門檻的 1.1 倍：算做到。
-        self.assertTrue(action_performed("turn_left", neutral, HeadPose(0.1 + YAW * 1.1, 0.5)))
+        self.assertIsNone(action_problem("turn_left", neutral, HeadPose(0.1 + YAW * 1.1, 0.5)))
 
     def test_unknown_action_never_passes(self):
         """規則：不認識的動作名稱一律不算做到。
@@ -174,8 +205,8 @@ class PoseTests(unittest.TestCase):
         為什麼重要：失敗時要偏向安全（fail closed）；請求格式雖然已經限制只能是四種動作，
         判斷函式本身也不應該因為未知的輸入而放行。
         """
-        # "blink"（眨眼）不是支援的動作；就算角度變化很大，也必須回 False。
-        self.assertFalse(action_performed("blink", HeadPose(0, 0.5), HeadPose(1, 1)))
+        # "blink"（眨眼）不是支援的動作；就算角度變化很大，也不算做到。
+        self.assertEqual(action_problem("blink", HeadPose(0, 0.5), HeadPose(1, 1)), "UNKNOWN_ACTION")
 
 
 class LiveDecisionTests(unittest.TestCase):
@@ -303,14 +334,14 @@ class LiveDecisionTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "FRAME_INVALID_IMAGE")
 
     def test_policy_version_marks_live_capture(self):
-        """規則：模型版本字串要以 policy-3 結尾，標示這是目前的判定政策版本。
+        """規則：模型版本字串要以 policy-4 結尾，標示這是目前的判定政策版本。
 
         為什麼重要：判定規則改變時，事後要能從紀錄看出每筆結果是依哪一版政策判定的。
         """
         # 跑一次會通過的即時鏡頭驗證。
         result = run_live(["turn_left"], [[face(yaw=YAW * 1.5)]])
-        # modelVersion 的結尾必須是 "policy-3"。
-        self.assertTrue(result.modelVersion.endswith("policy-3"))
+        # modelVersion 的結尾必須是 "policy-4"。
+        self.assertTrue(result.modelVersion.endswith("policy-4"))
 
     def test_rotated_static_photo_fails(self):
         """規則：同一張正臉只在畫面平面內轉動（側傾），不能冒充左右轉頭。
@@ -356,8 +387,10 @@ class LiveDecisionTests(unittest.TestCase):
             with self.subTest(label=label):
                 # 偵測器：正面影格用指定的臉、主照片正常、動作影格是正臉。
                 detector = FakeDetector([neutral], [face()], [face()])
+                # Face Landmarker 在正面影格與動作影格找到同樣的臉。
+                landmarker = FakeLandmarker([neutral], [face()])
                 # 跑一個 turn_left 的即時鏡頭請求。
-                result = verifier(detector=detector, embedder=FakeEmbedder(0.8, [0.9])).verify(
+                result = verifier(detector=detector, embedder=FakeEmbedder(0.8, [0.9]), landmarker=landmarker).verify(
                     VerifyRequest(**verify_request(actions=["turn_left"]))
                 )
                 # 必須回 CHALLENGE_FAILED。
@@ -387,6 +420,120 @@ class LiveDecisionTests(unittest.TestCase):
         )
         # 通過，livenessScore 是 0.7。
         self.assertEqual((passed.status, passed.livenessScore), ("verified", 0.7))
+
+    def test_face_landmarker_must_find_exactly_one_face(self):
+        """規則：Face Landmarker 在正面影格或動作影格沒有剛好找到一張臉時，回 CHALLENGE_FAILED。
+
+        為什麼重要：YuNet 和 Face Landmarker 是分開偵測的；Face Landmarker 看到的臉數不是 1 時，
+        無法確定量到的角度屬於 YuNet 確認過的那張臉，有疑問就不通過（fail closed）。
+        """
+        # 情境 → Face Landmarker 依序回傳的結果（正面影格、動作影格）：
+        cases = {
+            # 正面影格找不到臉。
+            "neutral_none": ([], [face(yaw=YAW * 1.5)]),
+            # 動作影格找到兩張臉（第一張有做到動作）。
+            "action_two": ([face()], [face(yaw=YAW * 1.5), face(x=120)]),
+        }
+        # 逐一測試。
+        for label, results in cases.items():
+            # 用 subTest 分開標示。
+            with self.subTest(label=label):
+                # YuNet 在每張影像都找到剛好一張臉，動作影格有做到 turn_left。
+                detector = FakeDetector([face()], [face()], [face(yaw=YAW * 1.5)])
+                # 跑一個 turn_left 的即時鏡頭請求；log 不需要檢查，用 captured 接住避免干擾測試輸出。
+                result, _ = captured(
+                    lambda: verifier(
+                        detector=detector, embedder=FakeEmbedder(0.8, [0.9]), landmarker=FakeLandmarker(*results)
+                    ).verify(VerifyRequest(**verify_request(actions=["turn_left"])))
+                )
+                # 必須回 CHALLENGE_FAILED。
+                self.assertEqual((result.status, result.reasonCode), ("rejected", "CHALLENGE_FAILED"))
+
+    def test_pose_is_measured_on_original_frame(self):
+        """規則：Face Landmarker 拿到的是原始大小的影格，不是給 YuNet 縮到長邊 640 的工作影像。
+
+        為什麼重要：前端拿鏡頭原始畫面量角度；伺服器用同樣大小的影像量，兩邊的數字才最接近。
+        """
+        # 正面影格 1280×960（YuNet 會縮成 640×480），一個 turn_left 動作。
+        request = VerifyRequest(**verify_request(size=(1280, 960), actions=["turn_left"]))
+        # YuNet 與 Face Landmarker 都找到做到動作的臉。
+        detector = FakeDetector([face()], [face()], [face(yaw=YAW * 1.5)])
+        landmarker = FakeLandmarker([face()], [face(yaw=YAW * 1.5)])
+        # 跑完整流程。
+        result = verifier(detector=detector, embedder=FakeEmbedder(0.8, [0.9]), landmarker=landmarker).verify(request)
+        # 通過驗證。
+        self.assertEqual(result.status, "verified")
+        # YuNet 拿到縮小後的正面影格（高 480、寬 640）。
+        self.assertEqual(detector.shapes[0], (480, 640, 3))
+        # Face Landmarker 拿到原始大小的正面影格（高 960、寬 1280）。
+        self.assertEqual(landmarker.shapes[0], (960, 1280, 3))
+
+    def test_challenge_failure_is_logged(self):
+        """規則：動作挑戰沒過時，在 log 印一行 JSON，記下請求編號、政策版本、子原因、動作與變化量。
+
+        為什麼重要：對外只有 CHALLENGE_FAILED 一個原因碼，沒有這行 log 就無從得知是哪個動作、差多少；
+        log 只能有變化量與正面影格的朝向，不能有 pitch 的絕對值（它反映的是五官比例）。
+        """
+        # 要求抬頭，但動作影格和正面影格一樣（沒有動）。
+        result, lines = captured(lambda: run_live(["look_up"], [[face()]]))
+        # 對外仍是 CHALLENGE_FAILED。
+        self.assertEqual(result.reasonCode, "CHALLENGE_FAILED")
+        # 剛好印了一行。
+        self.assertEqual(len(lines), 1)
+        # 那一行是 JSON，內容和預期完全相同（沒有多餘欄位）。
+        self.assertEqual(json.loads(lines[0]), {
+            "event": "CHALLENGE_FAILED", "requestId": "test-request-1", "policy": policy.POLICY_VERSION,
+            "reason": "INSUFFICIENT", "action": "look_up", "yawChange": 0.0, "pitchChange": 0.0, "rollChange": 0.0,
+        })
+
+    def test_failure_log_reasons(self):
+        """規則：每種動作挑戰的失敗都在 log 標出對應的子原因。
+
+        為什麼重要：要分得出是正面影格的問題、量不到角度、歪頭，還是動作幅度不夠，才知道該改哪裡。
+        """
+        # 正面影格往右偏超過上限：記錄 NEUTRAL_NOT_FACING 與正面影格的 yaw、roll。
+        tilted = face(yaw=-(policy.NEUTRAL_MAX_YAW + 0.05))
+        # 組出請求與假模型（YuNet 與 Face Landmarker 看到同樣的偏頭正面影格）。
+        _, lines = captured(lambda: verifier(
+            detector=FakeDetector([tilted], [face()], [face()]),
+            embedder=FakeEmbedder(0.8, [0.9]),
+            landmarker=FakeLandmarker([tilted], [face()]),
+        ).verify(VerifyRequest(**verify_request(actions=["turn_left"]))))
+        # 解析那一行 log。
+        entry = json.loads(lines[0])
+        # 子原因與正面影格的朝向。
+        self.assertEqual(
+            (entry["reason"], entry["neutralYaw"], entry["neutralRoll"]),
+            ("NEUTRAL_NOT_FACING", round(-(policy.NEUTRAL_MAX_YAW + 0.05), 3), 0.0),
+        )
+        # 動作影格側傾 20°（超過 15° 的上限）：記錄 ROLL_CHANGED 與側傾變化量。
+        _, lines = captured(lambda: run_live(["turn_left"], [[face(yaw=YAW * 1.5, roll=20)]]))
+        # 解析那一行 log。
+        entry = json.loads(lines[0])
+        # 子原因、動作與側傾變化量。
+        self.assertEqual((entry["reason"], entry["action"], entry["rollChange"]), ("ROLL_CHANGED", "turn_left", 20.0))
+        # Face Landmarker 在動作影格找不到臉：記錄 POSE_UNAVAILABLE 與動作，沒有變化量。
+        _, lines = captured(lambda: verifier(
+            detector=FakeDetector([face()], [face()], [face(yaw=YAW * 1.5)]),
+            embedder=FakeEmbedder(0.8, [0.9]),
+            landmarker=FakeLandmarker([face()], []),
+        ).verify(VerifyRequest(**verify_request(actions=["look_down"]))))
+        # 解析那一行 log。
+        entry = json.loads(lines[0])
+        # 只有子原因與動作。
+        self.assertEqual((entry["reason"], entry["action"], "yawChange" in entry), ("POSE_UNAVAILABLE", "look_down", False))
+
+    def test_passing_challenge_logs_nothing(self):
+        """規則：動作挑戰通過時不印任何診斷 log。
+
+        為什麼重要：log 只為了找出失敗原因；通過的驗證不需要留下任何臉部相關的數字。
+        """
+        # 一個會通過的即時鏡頭驗證。
+        result, lines = captured(lambda: run_live(["turn_left"], [[face(yaw=YAW * 1.5)]]))
+        # 通過。
+        self.assertEqual(result.status, "verified")
+        # 沒有任何輸出。
+        self.assertEqual(lines, [])
 
 
 # 這個檔案被當成主程式執行時（例如在 services/face 目錄下執行 python -m tests.test_live）才跑測試；

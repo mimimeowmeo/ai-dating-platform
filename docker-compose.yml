@@ -62,7 +62,7 @@ services:
       timeout: 5s
       start_period: 30s
       retries: 3
-  # 自架真人驗證 provider（YuNet＋SFace＋MiniFASNet，見 services/face/README.md）。
+  # 自架真人驗證 provider（YuNet＋SFace＋MiniFASNet＋MediaPipe Face Landmarker，見 services/face/README.md）。
   # 屬於 face profile，預設不啟動；CI 與測試用的 compose 也不包含它。
   # 啟用：.env 設 AI_VERIFICATION_PROVIDER_URL=http://face:8100/verify，再執行
   #   docker compose --profile face up -d face ai

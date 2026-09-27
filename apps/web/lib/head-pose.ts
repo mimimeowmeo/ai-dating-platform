@@ -1,5 +1,6 @@
 // 即時框臉用的頭部角度計算。算法必須和 provider（services/face/app/pose.py）相同：
-// 伺服器用 YuNet 的 5 個點重算，這裡用 MediaPipe 對應位置的點，讓兩邊的數字可以互相比較。
+// 伺服器用同一個 Face Landmarker 模型檔、同一組點索引（services/face/app/models.py 的 MEDIAPIPE_*）重算，
+// 兩邊的數字才能互相比較；改這裡的點或公式時，伺服器要一起改。
 // 先轉到「兩眼連線」座標系（u＝兩眼連線方向、固定指向畫面右側；n＝和 u 垂直、指向畫面下方；d＝鼻尖 − 兩眼中點）：
 //   yaw   = (d · u) ÷ 兩眼距離；往自己的左邊轉頭，數值變大。
 //   pitch = (d · n) ÷ ((嘴角中點 − 兩眼中點) · n)；抬頭時數值變小。
@@ -11,7 +12,8 @@ export type ChallengeAction =
 export type Point = { x: number; y: number };
 export type HeadPose = { yaw: number; pitch: number; roll: number };
 
-// 伺服器的門檻（services/face/app/policy.py）。前端要求 1.5 倍才拍下影格，留出兩邊算法的誤差。
+// 伺服器的門檻（services/face/app/policy.py）。前端要求 1.5 倍才拍下影格，
+// 留出這裡 VIDEO 模式（跨幀追蹤）與伺服器 IMAGE 模式（每張獨立偵測）、JPEG 壓縮造成的差異。
 const SERVER_YAW = 0.12;
 const SERVER_PITCH = 0.08;
 const SERVER_MAX_ROLL_CHANGE = 15;

@@ -1,4 +1,4 @@
-"""三個模型的包裝：YuNet（人臉偵測）、SFace（人臉特徵）、MiniFASNet（被動防偽）。
+"""四個模型的包裝：YuNet（人臉偵測）、SFace（人臉特徵）、MiniFASNet（被動防偽）、MediaPipe Face Landmarker（頭部角度）。
 
 pipeline 只依賴這裡的介面，測試可以換成假模型，不需要真的模型檔。
 
@@ -11,6 +11,9 @@ pipeline 只依賴這裡的介面，測試可以換成假模型，不需要真�
 - MiniFASNet（Silent-Face-Anti-Spoofing）：看臉部周圍的裁切影像，判斷是真人還是翻拍的照片、螢幕等假臉
   （被動防偽，passive anti-spoofing：不需要使用者做動作）。build 時已用 torch 轉成 ONNX，
   執行期只用 onnxruntime 推論，映像不必安裝 torch。
+- MediaPipe Face Landmarker：在影像裡找出人臉的 478 個 3D 臉部點；這裡只取算頭部角度要用的 5 個位置
+  （兩眼、鼻尖、兩個嘴角），給 pose.py 判斷動作挑戰有沒有做到。前端（apps/web/lib/head-pose.ts）
+  用同一個模型檔、同一組點索引，兩邊量到的角度才能互相比較。YuNet 的 5 個點仍用在 SFace 對齊。
 
 模型檔由 tools/fetch_models.py 與 tools/export_minifasnet.py 在 Docker build 時準備好，
 放在 FACE_MODEL_DIR（預設 /app/models）。
@@ -27,6 +30,10 @@ import cv2
 import numpy as np
 # onnxruntime：執行 ONNX 模型的推論引擎，用來跑轉好的 MiniFASNet。
 import onnxruntime as ort
+# MediaPipe：Google 的影像推論套件；mp.Image 包裝影像，vision.FaceLandmarker 執行臉部點偵測。
+import mediapipe as mp
+# BaseOptions：指定模型檔路徑；vision：Face Landmarker 的建立選項與執行模式。
+from mediapipe.tasks.python import BaseOptions, vision
 
 # crop_patch：依 Silent-Face 原始的裁切方式，以臉框為中心放大後裁切並縮放（見 crop.py）。
 from .crop import crop_patch
@@ -44,6 +51,20 @@ MINIFASNET_INPUT = 80
 # MiniFASNet 三個類別中，index 1 是真人（Silent-Face test.py：label == 1 為 real face）。
 # 其他兩個類別都算假臉。
 REAL_CLASS = 1
+# MediaPipe Face Landmarker 的模型包（float16 第 1 版），和前端 public/mediapipe/face_landmarker.task 是同一個檔案。
+FACE_LANDMARKER_FILE = "face_landmarker.task"
+# 一次最多找幾張臉：和前端一樣設 2，才分得出「剛好一張」和「多張」；超過一張時不量角度。
+FACE_LANDMARKER_MAX_FACES = 2
+# Face Landmarker 478 個點裡要用的索引，必須和 apps/web/lib/head-pose.ts 完全相同：
+# 兩眼各取內外眼角的中點（不受眼珠轉動影響）、鼻尖、兩個嘴角。
+# 「右」是使用者自己的右邊，出現在沒有鏡像的相機畫面左側。
+MEDIAPIPE_RIGHT_EYE = (33, 133)
+# 左眼的外眼角與內眼角。
+MEDIAPIPE_LEFT_EYE = (362, 263)
+# 鼻尖。
+MEDIAPIPE_NOSE_TIP = 1
+# 右嘴角、左嘴角。
+MEDIAPIPE_MOUTH = (61, 291)
 
 
 class ModelError(RuntimeError):
@@ -78,6 +99,26 @@ class Face:
     row: np.ndarray  # YuNet 原始的 15 個值（float32），SFace 對齊要用前 14 個
     # 偵測信心分數，已經過 score_threshold 過濾（低於門檻的臉 YuNet 不會回傳）
     score: float
+
+
+# 不可變：臉部點算出來之後不應再被修改。
+@dataclass(frozen=True)
+class FacePoints:
+    """算頭部角度要用的 5 個臉部位置，單位是像素，座標屬於送進 Face Landmarker 的那張影像。
+
+    欄位（每個都是 (x, y)）：
+        right_eye：使用者右眼（兩個眼角的中點），在沒有鏡像的畫面左側。
+        left_eye：使用者左眼（兩個眼角的中點）。
+        nose：鼻尖。
+        mouth_right：使用者右邊的嘴角。
+        mouth_left：使用者左邊的嘴角。
+    """
+
+    right_eye: tuple[float, float]
+    left_eye: tuple[float, float]
+    nose: tuple[float, float]
+    mouth_right: tuple[float, float]
+    mouth_left: tuple[float, float]
 
 
 # 同樣設成不可變：防偽結果算出來之後不應再被修改。
@@ -271,12 +312,96 @@ class MiniFASNetSpoofDetector:
         )
 
 
+class MediaPipeLandmarker:
+    """用 MediaPipe Face Landmarker 找臉部點，換算成 pose.py 要用的 5 個位置。
+
+    用 IMAGE 模式（每張影像獨立偵測）；前端是 VIDEO 模式（會沿用前幾幀的結果追蹤），
+    兩者用同一個模型檔，差異只來自偵測模式與 JPEG 壓縮，前端要求 1.5 倍的變化量就是留給這個差異。
+    同一個實例一次只給一個請求用（pipeline.FaceVerifier 的鎖已保證）。
+    """
+
+    def __init__(self, path: Path):
+        """載入 Face Landmarker 模型包。
+
+        參數：
+            path：face_landmarker.task 的路徑。
+
+        可能丟出：模型檔無法讀取、格式錯誤或缺少系統函式庫（例如 libEGL）時，MediaPipe 會丟出錯誤。
+        """
+        # IMAGE 模式：detect 一次處理一張影像，不需要時間戳記；其他偵測信心門檻沿用預設值（和前端相同）。
+        options = vision.FaceLandmarkerOptions(
+            # 模型包路徑（MediaPipe 要字串）。
+            base_options=BaseOptions(model_asset_path=str(path)),
+            # 每張影像獨立偵測。
+            running_mode=vision.RunningMode.IMAGE,
+            # 最多找 2 張臉，才看得出「不只一張」。
+            num_faces=FACE_LANDMARKER_MAX_FACES,
+        )
+        # 建立偵測器；之後每次 locate 都共用它。
+        self._landmarker = vision.FaceLandmarker.create_from_options(options)
+
+    def locate(self, image: np.ndarray) -> list[FacePoints]:
+        """找出影像中每張臉的 5 個臉部位置。
+
+        參數：
+            image：BGR 色彩順序的 uint8 影像陣列，形狀是 (高, 寬, 3)。
+
+        回傳：
+            每張臉一個 FacePoints（像素座標）；沒有臉時回傳空清單。pipeline 只接受剛好一張。
+        """
+        # image.shape 是 (高, 寬, 通道數)，[:2] 只取高與寬，用來把正規化座標換回像素。
+        height, width = image.shape[:2]
+        # MediaPipe 要 RGB，OpenCV 解出來的是 BGR；ascontiguousarray 確保記憶體連續，MediaPipe 才能直接讀。
+        rgb = np.ascontiguousarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        # 執行偵測；face_landmarks 是每張臉 478 個點的清單，每個點的 x、y 是 0–1 的正規化座標。
+        result = self._landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
+
+        def pixel(points, index):
+            """把第 index 個點換成像素座標 (x, y)。寬高各自乘回去，比例才和原圖一致（前端也是這樣換算）。"""
+            # 取出這個點。
+            point = points[index]
+            # 正規化座標乘上影像寬、高。
+            return (point.x * width, point.y * height)
+
+        def middle(points, pair):
+            """兩個點（例如內外眼角）的中點，像素座標。"""
+            # 先把兩個點都換成像素座標。
+            (ax, ay), (bx, by) = pixel(points, pair[0]), pixel(points, pair[1])
+            # x、y 各取平均。
+            return ((ax + bx) / 2, (ay + by) / 2)
+
+        # 每張臉取出 5 個位置，組成 FacePoints。
+        return [
+            FacePoints(
+                # 兩眼各取內外眼角的中點。
+                right_eye=middle(points, MEDIAPIPE_RIGHT_EYE),
+                left_eye=middle(points, MEDIAPIPE_LEFT_EYE),
+                # 鼻尖。
+                nose=pixel(points, MEDIAPIPE_NOSE_TIP),
+                # 兩個嘴角。
+                mouth_right=pixel(points, MEDIAPIPE_MOUTH[0]),
+                mouth_left=pixel(points, MEDIAPIPE_MOUTH[1]),
+            )
+            # 逐張臉走訪偵測結果。
+            for points in result.face_landmarks
+        ]
+
+    def close(self) -> None:
+        """釋放 MediaPipe 的原生資源；服務關閉時由 main.py 呼叫。
+
+        不主動關閉的話，Python 結束時才由垃圾回收關閉，那時 MediaPipe 需要的函式可能已經被清掉，
+        會在 log 留下一段無害但誤導的錯誤訊息。
+        """
+        # 關閉偵測器。
+        self._landmarker.close()
+
+
 # 不可變：模型組合建立後不應被替換。
 @dataclass(frozen=True)
 class Models:
-    """驗證流程需要的三個模型，打包成一個物件傳給 pipeline.FaceVerifier。
+    """驗證流程需要的四個模型，打包成一個物件傳給 pipeline.FaceVerifier。
 
-    pipeline 只呼叫 detector.detect、embedder.embed、spoof.assess 這三個方法，
+    pipeline 只呼叫 detector.detect、embedder.embed、spoof.assess、landmarker.locate 這四個方法，
     所以測試（tests/fakes.py）可以放入同樣介面的假物件，不需要真的模型檔。
     """
 
@@ -286,6 +411,13 @@ class Models:
     embedder: SFaceEmbedder
     # MiniFASNet 被動防偽
     spoof: MiniFASNetSpoofDetector
+    # MediaPipe Face Landmarker：動作挑戰的頭部角度
+    landmarker: MediaPipeLandmarker
+
+    def close(self) -> None:
+        """釋放需要明確關閉的模型資源（目前只有 MediaPipe；OpenCV 與 onnxruntime 會自己釋放）。"""
+        # 關閉 Face Landmarker。
+        self.landmarker.close()
 
 
 def load_models(model_dir: Path, detection_score_threshold: float) -> Models:
@@ -296,23 +428,23 @@ def load_models(model_dir: Path, detection_score_threshold: float) -> Models:
         detection_score_threshold：YuNet 的偵測信心門檻（policy.DETECTION_SCORE_THRESHOLD）。
 
     回傳：
-        Models：載入好的三個模型。
+        Models：載入好的四個模型。
 
     可能丟出：
         ModelError("MODEL_FILES_MISSING")：任何一個模型檔不存在。先檢查再載入，錯誤代碼比較明確；
             錯誤不列出缺了哪些檔名。
-        其他 OpenCV／onnxruntime 的錯誤：模型檔存在但無法載入。
+        其他 OpenCV／onnxruntime／MediaPipe 的錯誤：模型檔存在但無法載入。
         main.py 捕捉所有錯誤後讓服務以「模型未載入」的狀態啟動（/health 回 503、/verify fail closed）。
     """
-    # 需要的所有檔名：YuNet、SFace，再加上兩個 MiniFASNet 的檔名（* 把產生器展開放進清單）。
-    required = [YUNET_FILE, SFACE_FILE, *(name for name, _ in MINIFASNET_FILES)]
+    # 需要的所有檔名：YuNet、SFace、Face Landmarker，再加上兩個 MiniFASNet 的檔名（* 把產生器展開放進清單）。
+    required = [YUNET_FILE, SFACE_FILE, FACE_LANDMARKER_FILE, *(name for name, _ in MINIFASNET_FILES)]
     # 找出資料夾中不存在（或不是一般檔案）的檔名。
     missing = [name for name in required if not (model_dir / name).is_file()]
     # 只要有缺，就不載入任何模型。
     if missing:
         # 丟出固定代碼的錯誤。
         raise ModelError("MODEL_FILES_MISSING")
-    # 所有檔案都在：逐一建立三個模型並打包回傳。
+    # 所有檔案都在：逐一建立四個模型並打包回傳。
     return Models(
         # YuNet：模型路徑 + 偵測信心門檻
         detector=YuNetDetector(model_dir / YUNET_FILE, detection_score_threshold),
@@ -320,4 +452,6 @@ def load_models(model_dir: Path, detection_score_threshold: float) -> Models:
         embedder=SFaceEmbedder(model_dir / SFACE_FILE),
         # MiniFASNet：傳資料夾，兩個模型檔由類別自己依 MINIFASNET_FILES 載入
         spoof=MiniFASNetSpoofDetector(model_dir),
+        # MediaPipe Face Landmarker：模型包路徑
+        landmarker=MediaPipeLandmarker(model_dir / FACE_LANDMARKER_FILE),
     )
