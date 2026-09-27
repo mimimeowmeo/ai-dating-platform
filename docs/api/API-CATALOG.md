@@ -86,6 +86,9 @@ Base path: `/api/v1`
 - `POST /conversations`
 - `GET /conversations/:conversationId`
 - `GET /conversations/:conversationId/messages`
+- `POST /conversations/:conversationId/reply-suggestions` — AI 推薦回覆（`docs/ai/REPLY-SUGGESTIONS-SPEC.md`）。回傳 `{requestId, status, mode, notice, canRegenerate, suggestions[]}`，最多 5 則。
+  - 每一輪只產生一次（2026-09-28）：「一輪」＝聊天室的最後一則訊息相同。同一個人在同一輪已經有成功的推薦（ok／partial／empty）時，再按會回傳同一批（同樣的 requestId 與推薦 id），不呼叫 AI、不新增紀錄。失敗（503）不算用掉這一輪。
+  - `canRegenerate` 目前固定 `false`（「換一批」鎖住，`apps/api/src/ai-reply.ts` 的 `ALLOW_REGENERATE`）。
 
 Socket events should handle realtime delivery, typing, read receipts, and presence.
 

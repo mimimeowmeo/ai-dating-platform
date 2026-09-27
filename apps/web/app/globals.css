@@ -1952,7 +1952,7 @@ input[type="range"] {
   color: var(--tag-alt-ink);
   opacity: 1;
 }
-/* 其餘建議：輸入框上方的膠囊按鈕，點一下換掉輸入框內容。 */
+/* 這一批的全部建議（包含第 1 則）：輸入框上方的膠囊按鈕，點一下換掉輸入框內容。 */
 .ai-chips {
   display: flex;
   flex-wrap: wrap;
@@ -1974,6 +1974,12 @@ input[type="range"] {
 }
 .ai-chips button:hover {
   background: var(--primary-soft);
+}
+/* 輸入框現在用的是這一則：框線換成主色，點過別則之後還找得到第 1 則。 */
+.ai-chips button[aria-pressed="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  font-weight: 600;
 }
 .ai-chips .ai-note {
   color: var(--muted);
