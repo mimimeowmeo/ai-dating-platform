@@ -409,10 +409,14 @@ export class VectorStore {
    * 興趣分數：五類標籤各算 Jaccard（共同標籤 ÷ 兩人標籤聯集），再依 70/15/2/5/8 加權
    * （HeartLink Matching Core 的 PREFERENCE_WEIGHTS）。dating_goal 是硬篩選，不計分。
    * 沒有任何計分標籤的候選人不會出現在結果裡，呼叫端當 0 分。
+   * 用 numeric 算、四捨五入到小數 12 位：浮點數加總的順序不固定，標籤相同的兩個人會算出 1 和 0.9999999999999999，
+   * 並列被打破後排序變成隨機；分數相同時要維持傳進來的順序（最新註冊在前）。
    */
   async interestScores(userId: string, candidateIds: string[]) {
     if (!candidateIds.length) return new Map<string, number>();
-    const rows = await this.db.$queryRaw<{ user_id: string; score: number }[]>`
+    const rows = await this.db.$queryRaw<
+      { user_id: string; score: Prisma.Decimal }[]
+    >`
       WITH weights(category, weight) AS (
         VALUES ('interest', 0.70), ('personality', 0.15), ('lifestyle', 0.02),
                ('value', 0.05), ('diet', 0.08)
@@ -432,7 +436,7 @@ export class VectorStore {
         GROUP BY ut.user_id, t.category
       )
       SELECT th.user_id::text AS user_id,
-             SUM(w.weight * th.shared::float8 / (th.n + COALESCE(mc.n, 0) - th.shared)) AS score
+             ROUND(SUM(w.weight * th.shared / (th.n + COALESCE(mc.n, 0) - th.shared)), 12) AS score
       FROM theirs th
       JOIN weights w ON w.category = th.category
       LEFT JOIN mine_count mc ON mc.category = th.category
