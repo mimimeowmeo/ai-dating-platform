@@ -15,6 +15,8 @@ import type {
   AiStyleProfileResult,
 } from "./ai-client";
 
+/** 外貌向量的維度（CLIP ViT-B/32 的影像向量）；必須和 appearance_embeddings 的 vector(512) 一致。 */
+export const APPEARANCE_DIMENSIONS = 512;
 /** 產生推薦時最多放幾段檢索到的舊對話（AI 服務的上限是 12 段，prompt 預算約 1.5k tokens）。 */
 export const CHUNK_MATCHES = 6;
 /** 產生推薦時最多放幾條 B 的特徵句（AI 服務的上限是 20 條）。 */
@@ -317,5 +319,189 @@ export class VectorStore {
       exclamationRatio: Number(row.exclamation_ratio ?? 0),
       laughterRatio: Number(row.laughter_ratio ?? 0),
     };
+  }
+
+  /**
+   * 外貌分數與略過扣分要用的數字，每位有向量的候選人一列：
+   * - base：和「我最近按喜歡的人」的主照片向量逐一比，取最高的相似度（多錨點、不取平均：
+   *   平均會把喜歡的兩種型混成四不像，HeartLink Appearance Core V1）。
+   * - nearLike／nearPass：相似度達到「附近」門檻的喜歡、略過各幾個，給 PASS V2 扣分用。
+   *   門檻依候選人性別不同（near），由呼叫端依種子資料校準後傳入；gender 給扣分換算尺度用。
+   * 沒有向量的候選人不會出現在結果裡；候選池最多一萬多人，精確搜尋就夠快。
+   */
+  async appearanceScores(
+    anchorUserIds: string[],
+    passUserIds: string[],
+    candidateIds: string[],
+    near: { woman: number; man: number; other: number },
+  ) {
+    const scores = new Map<
+      string,
+      { base: number; nearLike: number; nearPass: number; gender: string }
+    >();
+    if (!anchorUserIds.length || !candidateIds.length) return scores;
+    const rows = await this.db.$queryRaw<
+      {
+        user_id: string;
+        gender: string;
+        base: number | null;
+        near_like: bigint;
+        near_pass: bigint;
+      }[]
+    >`
+      WITH anchors AS (
+        SELECT e.embedding
+        FROM appearance_embeddings e
+        JOIN user_photos p ON p.id = e.photo_id AND p.is_avatar AND p.deleted_at IS NULL
+        WHERE e.user_id = ANY(${anchorUserIds}::uuid[]) AND e.embedding IS NOT NULL
+      ),
+      passes AS (
+        SELECT e.embedding
+        FROM appearance_embeddings e
+        JOIN user_photos p ON p.id = e.photo_id AND p.is_avatar AND p.deleted_at IS NULL
+        WHERE e.user_id = ANY(${passUserIds}::uuid[]) AND e.embedding IS NOT NULL
+      ),
+      candidates AS (
+        SELECT e.user_id, e.embedding, pr.gender,
+               CASE pr.gender WHEN 'woman' THEN ${near.woman}::float8
+                              WHEN 'man' THEN ${near.man}::float8
+                              ELSE ${near.other}::float8 END AS near
+        FROM appearance_embeddings e
+        JOIN user_photos p ON p.id = e.photo_id AND p.is_avatar AND p.deleted_at IS NULL
+        JOIN profiles pr ON pr.user_id = e.user_id
+        WHERE e.user_id = ANY(${candidateIds}::uuid[]) AND e.embedding IS NOT NULL
+      )
+      SELECT c.user_id::text AS user_id, c.gender::text AS gender,
+             (SELECT MAX(1 - (c.embedding <=> a.embedding)) FROM anchors a) AS base,
+             (SELECT COUNT(*) FROM anchors a WHERE 1 - (c.embedding <=> a.embedding) >= c.near) AS near_like,
+             (SELECT COUNT(*) FROM passes s WHERE 1 - (c.embedding <=> s.embedding) >= c.near) AS near_pass
+      FROM candidates c
+    `;
+    for (const row of rows)
+      if (row.base !== null)
+        scores.set(row.user_id, {
+          base: Number(row.base),
+          nearLike: Number(row.near_like),
+          nearPass: Number(row.near_pass),
+          gender: row.gender,
+        });
+    return scores;
+  }
+
+  /**
+   * 興趣分數：五類標籤各算 Jaccard（共同標籤 ÷ 兩人標籤聯集），再依 70/15/2/5/8 加權
+   * （HeartLink Matching Core 的 PREFERENCE_WEIGHTS）。dating_goal 是硬篩選，不計分。
+   * 沒有任何計分標籤的候選人不會出現在結果裡，呼叫端當 0 分。
+   */
+  async interestScores(userId: string, candidateIds: string[]) {
+    if (!candidateIds.length) return new Map<string, number>();
+    const rows = await this.db.$queryRaw<{ user_id: string; score: number }[]>`
+      WITH weights(category, weight) AS (
+        VALUES ('interest', 0.70), ('personality', 0.15), ('lifestyle', 0.02),
+               ('value', 0.05), ('diet', 0.08)
+      ),
+      mine AS (
+        SELECT t.category, ut.trait_id
+        FROM user_traits ut JOIN traits t ON t.id = ut.trait_id
+        WHERE ut.user_id = ${userId}::uuid
+      ),
+      mine_count AS (SELECT category, COUNT(*) AS n FROM mine GROUP BY category),
+      theirs AS (
+        SELECT ut.user_id, t.category, COUNT(*) AS n, COUNT(m.trait_id) AS shared
+        FROM user_traits ut
+        JOIN traits t ON t.id = ut.trait_id
+        LEFT JOIN mine m ON m.trait_id = ut.trait_id
+        WHERE ut.user_id = ANY(${candidateIds}::uuid[])
+        GROUP BY ut.user_id, t.category
+      )
+      SELECT th.user_id::text AS user_id,
+             SUM(w.weight * th.shared::float8 / (th.n + COALESCE(mc.n, 0) - th.shared)) AS score
+      FROM theirs th
+      JOIN weights w ON w.category = th.category
+      LEFT JOIN mine_count mc ON mc.category = th.category
+      GROUP BY th.user_id
+    `;
+    return new Map(rows.map((row) => [row.user_id, Number(row.score)]));
+  }
+
+  /**
+   * 匯入外貌向量（prisma/import-appearance.ts 用）：用照片的 storage_key 對到 user_photos，
+   * 對不到的照片略過；同一張照片重匯就覆蓋。回傳實際寫入的筆數。
+   */
+  async upsertAppearanceEmbeddings(
+    rows: { storageKey: string; modelVersion: string; embedding: number[] }[],
+  ) {
+    let written = 0;
+    for (const row of rows) {
+      written += await this.db.$executeRaw`
+        INSERT INTO appearance_embeddings (photo_id, user_id, model_version, embedding)
+        SELECT p.id, p.user_id, ${row.modelVersion},
+               ${toVector(row.embedding, APPEARANCE_DIMENSIONS)}::vector
+        FROM user_photos p
+        WHERE p.storage_key = ${row.storageKey}
+        ON CONFLICT (photo_id) DO UPDATE
+          SET model_version = EXCLUDED.model_version, embedding = EXCLUDED.embedding,
+              created_at = CURRENT_TIMESTAMP
+      `;
+    }
+    return written;
+  }
+
+  /**
+   * worker 算好的向量寫回（rec-jobs.ts）；找不到臉時 embedding 是 null，也留一列表示處理過。
+   * 照片已刪除或不存在就不寫，避免刪照片後向量又被寫回來；FOR SHARE 等正在刪這張照片的交易結束再判斷，
+   * 不會在刪除交易的空檔寫進去。回傳是否寫入。
+   */
+  async storeAppearanceEmbedding(
+    photoId: string,
+    modelVersion: string,
+    embedding: number[] | null,
+  ) {
+    const vector = embedding
+      ? toVector(embedding, APPEARANCE_DIMENSIONS)
+      : null;
+    const written = await this.db.$executeRaw`
+      INSERT INTO appearance_embeddings (photo_id, user_id, model_version, embedding)
+      SELECT p.id, p.user_id, ${modelVersion}, ${vector}::vector
+      FROM user_photos p
+      WHERE p.id = ${photoId}::uuid AND p.deleted_at IS NULL
+      FOR SHARE
+      ON CONFLICT (photo_id) DO UPDATE
+        SET model_version = EXCLUDED.model_version, embedding = EXCLUDED.embedding,
+            created_at = CURRENT_TIMESTAMP
+    `;
+    return written > 0;
+  }
+
+  /** 讀某個外貌方向（例如 glasses）；沒有匯入過就回 null。 */
+  async appearanceDirection(name: string) {
+    const [row] = await this.db.$queryRaw<
+      { model_version: string; direction: string }[]
+    >`
+      SELECT model_version, direction::text AS direction
+      FROM appearance_directions
+      WHERE name = ${name}
+    `;
+    return row
+      ? {
+          modelVersion: row.model_version,
+          vector: JSON.parse(row.direction) as number[],
+        }
+      : null;
+  }
+
+  /** 匯入外貌方向（prisma/import-appearance.ts 用）；同名就覆蓋。 */
+  async upsertAppearanceDirection(
+    name: string,
+    modelVersion: string,
+    vector: number[],
+  ) {
+    await this.db.$executeRaw`
+      INSERT INTO appearance_directions (name, model_version, direction)
+      VALUES (${name}, ${modelVersion}, ${toVector(vector, APPEARANCE_DIMENSIONS)}::vector)
+      ON CONFLICT (name) DO UPDATE
+        SET model_version = EXCLUDED.model_version, direction = EXCLUDED.direction,
+            created_at = CURRENT_TIMESTAMP
+    `;
   }
 }

@@ -25,6 +25,7 @@ import { AiJobs } from "./ai-jobs";
 import { MessageOrigins } from "./ai-origins";
 import { ReplySuggestions } from "./ai-reply";
 import { VectorStore } from "./ai-store";
+import { RecJobs } from "./rec-jobs";
 @Module({
   controllers: [AuthController, HealthController, ProductController],
   providers: [
@@ -45,6 +46,8 @@ import { VectorStore } from "./ai-store";
     AiJobs,
     MessageOrigins,
     ReplySuggestions,
+    // 探索頁的外貌向量：新的主照片排給推薦 worker 算，結果寫回 appearance_embeddings。
+    RecJobs,
   ],
 })
 class AppModule {}

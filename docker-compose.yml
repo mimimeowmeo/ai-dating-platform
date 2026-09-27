@@ -75,6 +75,19 @@ services:
       # 和 ai 呼叫 provider 用的是同一個 token；沒設定時 /verify 一律回 503。
       FACE_PROVIDER_TOKEN: ${AI_VERIFICATION_PROVIDER_TOKEN:-}
     ports: ["127.0.0.1:8100:8100"]
+  # 推薦 worker（services/recommendation/README.md）：主照片 → 外貌向量，給探索頁排序用。
+  # 屬於 recommendation profile，預設不啟動（映像約 3GB，含 CLIP 模型）；CI 與測試用的 compose 也不包含它。
+  # 沒啟動時 API 不把照片放進佇列，探索頁照常運作（沒有向量的人外貌分數給中間值）；啟動後 API 每分鐘自動補排。
+  # 啟用：docker compose --profile recommendation up -d recommendation-worker
+  recommendation-worker:
+    profiles: ["recommendation"]
+    build: { context: ., dockerfile: services/recommendation/Dockerfile }
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis: { condition: service_healthy }
   api:
     build: { context: ., dockerfile: apps/api/Dockerfile }
     restart: unless-stopped

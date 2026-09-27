@@ -20,6 +20,34 @@ import {
 } from "./profiles";
 import { MessageOrigins } from "./ai-origins";
 import { AiJobs } from "./ai-jobs";
+import { VectorStore } from "./ai-store";
+import {
+  NEAR_THRESHOLDS,
+  applyQuota,
+  passPenalty,
+  personalizedRatio,
+  rankCandidates,
+} from "./discovery-rank";
+/**
+ * 探索頁的三個開關，預設都開；網址帶 ?hardfilter=false、?appearance=false、?interest=false 可以個別關掉（測試用）。
+ * hardFilter：雙向的年齡、性別、交往目的、身高、距離篩選。封鎖、已按過、已配對的人不管開關都排除。
+ */
+export type DiscoveryOptions = {
+  hardFilter: boolean;
+  appearance: boolean;
+  interest: boolean;
+};
+const allDiscoveryOn: DiscoveryOptions = {
+  hardFilter: true,
+  appearance: true,
+  interest: true,
+};
+/** 外貌分數用最近幾個「喜歡」當參考臉。 */
+const APPEARANCE_ANCHORS = 20;
+/** 略過扣分最多看最近幾個「略過」：Core V1 看全部，時間一久扣分會越積越多。 */
+const PASS_HISTORY = 200;
+/** 探索頁一次回傳幾張卡。 */
+const DISCOVERY_LIMIT = 30;
 const messageInput = z
   .object({
     content: z.string().trim().min(1).max(2000),
@@ -36,6 +64,7 @@ export class Social {
     private infra: Infrastructure,
     private origins: MessageOrigins,
     private jobs: AiJobs,
+    private vectors: VectorStore,
   ) {}
   publish: (userId: string, event: string, data: unknown) => void = () => {};
   revoke: (conversationId: string) => void = () => {};
@@ -61,7 +90,7 @@ export class Social {
       distance(a.profile, q) <= p.maxDistanceKm
     );
   }
-  async discovery(id: string) {
+  async discovery(id: string, options: DiscoveryOptions = allDiscoveryOn) {
     const me = await this.db.user.findUniqueOrThrow({
       where: { id },
       include: userInclude,
@@ -71,24 +100,121 @@ export class Social {
       where: { fromUserId: id },
       select: { toUserId: true },
     });
-    const users = await this.db.user.findMany({
-      where: {
-        id: { notIn: [id, ...excluded.map((x) => x.toUserId)] },
-        profile: { isNot: null },
-        blocks: { none: { blockedUserId: id } },
-        blockedBy: { none: { userId: id } },
-        matchesA: { none: { userBId: id } },
-        matchesB: { none: { userAId: id } },
-      },
-      include: userInclude,
-      // 匯入資料的 createdAt 完全相同，加上 id 當第二排序鍵才有穩定順序。
-      orderBy: [{ createdAt: "desc" }, { id: "asc" }],
-      take: 500,
+    const where = {
+      id: { notIn: [id, ...excluded.map((x) => x.toUserId)] },
+      profile: { isNot: null },
+      blocks: { none: { blockedUserId: id } },
+      blockedBy: { none: { userId: id } },
+      matchesA: { none: { userBId: id } },
+      matchesB: { none: { userAId: id } },
+    };
+    // 匯入資料的 createdAt 完全相同，加上 id 當第二排序鍵才有穩定順序。
+    const orderBy = [{ createdAt: "desc" as const }, { id: "asc" as const }];
+    if (options.hardFilter) {
+      const users = (
+        await this.db.user.findMany({
+          where,
+          include: userInclude,
+          orderBy,
+          take: 500,
+        })
+      ).filter((u) => this.eligible(me, u) && this.eligible(u, me));
+      const byId = new Map(users.map((u) => [u.id, u]));
+      const ranked = await this.rank(
+        id,
+        users.map((u) => u.id),
+        options,
+      );
+      return ranked.map((userId) => card(byId.get(userId), id));
+    }
+    // 關掉硬篩選時整個使用者池都是候選人，先只取 id 排序，最後 30 人才載入卡片資料。
+    const pool = await this.db.user.findMany({
+      where,
+      select: { id: true },
+      orderBy,
     });
-    return users
-      .filter((u) => this.eligible(me, u) && this.eligible(u, me))
-      .slice(0, 30)
-      .map((u) => card(u, id));
+    const top = await this.rank(
+      id,
+      pool.map((u) => u.id),
+      options,
+    );
+    const users = await this.db.user.findMany({
+      where: { id: { in: top } },
+      include: userInclude,
+    });
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return top
+      .filter((userId) => byId.has(userId))
+      .map((userId) => card(byId.get(userId), id));
+  }
+  /**
+   * AI 排序，回傳最多 30 人：
+   * 1. 外貌分數 = 和我最近按喜歡的 20 人最像的相似度，再扣 PASS V2（附近被我略過的人太多就扣，
+   *    幅度依種子分布校準，女最多約 0.034、男約 0.051）。
+   * 2. 外貌、興趣分數各自換成候選池裡的百分位再相加：都開時外貌 60%、興趣 40%，關掉其中一個另一個就是 100%。
+   *    還沒按過喜歡、或按過的人都沒有外貌向量時，外貌算不出來，改成興趣 100%；候選人沒有外貌向量時給中間值。
+   * 3. 外貌開著時保留探索名額（Core V1）：依按過的喜歡數，個人化 60～80%，其餘從剩下的人用固定種子挑，
+   *    避開被扣分的人，平均穿插。種子含日期與喜歡數，同一天沒有新的喜歡時探索名單不變。
+   * 兩個都關時維持傳進來的順序（最新註冊在前），不排探索。排序失敗不能讓探索頁壞掉，出錯就退回原本順序。
+   */
+  private async rank(id: string, ids: string[], options: DiscoveryOptions) {
+    if (!ids.length || (!options.appearance && !options.interest))
+      return ids.slice(0, DISCOVERY_LIMIT);
+    try {
+      let appearance: Map<string, number> | null = null;
+      const penalized = new Set<string>();
+      let likeCount = 0;
+      if (options.appearance) {
+        const [count, likes, passes] = await Promise.all([
+          this.db.interaction.count({
+            where: { fromUserId: id, action: "like" },
+          }),
+          this.db.interaction.findMany({
+            where: { fromUserId: id, action: "like" },
+            orderBy: { createdAt: "desc" },
+            take: APPEARANCE_ANCHORS,
+            select: { toUserId: true },
+          }),
+          this.db.interaction.findMany({
+            where: { fromUserId: id, action: "pass" },
+            orderBy: { createdAt: "desc" },
+            take: PASS_HISTORY,
+            select: { toUserId: true },
+          }),
+        ]);
+        likeCount = count;
+        const scores = await this.vectors.appearanceScores(
+          likes.map((like) => like.toUserId),
+          passes.map((pass) => pass.toUserId),
+          ids,
+          NEAR_THRESHOLDS,
+        );
+        appearance = new Map();
+        for (const [userId, score] of scores) {
+          const penalty = passPenalty(
+            score.nearPass,
+            score.nearLike,
+            score.gender,
+          );
+          if (penalty > 0) penalized.add(userId);
+          appearance.set(userId, Math.max(0, score.base - penalty));
+        }
+      }
+      const interest = options.interest
+        ? await this.vectors.interestScores(id, ids)
+        : null;
+      const ranked = rankCandidates(ids, appearance, interest);
+      if (!options.appearance) return ranked.slice(0, DISCOVERY_LIMIT);
+      return applyQuota(ranked, {
+        limit: DISCOVERY_LIMIT,
+        ratio: personalizedRatio(likeCount, options.interest),
+        seed: `${id}:${new Date().toISOString().slice(0, 10)}:${likeCount}`,
+        penalized,
+      });
+    } catch (error) {
+      console.error("DISCOVERY_RANK_FAILED", (error as Error).message);
+      return ids.slice(0, DISCOVERY_LIMIT);
+    }
   }
   /**
    * 測試用：用顯示名稱或 email 搜尋除了自己以外的全部使用者（不分大小寫、部分符合），

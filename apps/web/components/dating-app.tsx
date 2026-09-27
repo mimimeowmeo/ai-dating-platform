@@ -549,7 +549,10 @@ export function DatingApp() {
         </header>
         <main className="main-content">
           {path === "/discover" ? (
-            <Discover />
+            // Discover 會讀網址上的探索開關（useSearchParams），依官方建議包在 Suspense 裡。
+            <Suspense fallback={<Loading />}>
+              <Discover />
+            </Suspense>
           ) : path === "/profile" ? (
             <ProfilePage />
           ) : path === "/preferences" ? (
@@ -1025,8 +1028,18 @@ function PersonDialog({
     </dialog>
   );
 }
+// 探索排序的測試開關：網址帶 ?hardfilter=false、?appearance=false、?interest=false 就原樣轉給 API。
+function discoveryPath(params: URLSearchParams) {
+  const flags = new URLSearchParams();
+  for (const flag of ["hardfilter", "appearance", "interest"])
+    if (params.get(flag) === "false") flags.set(flag, "false");
+  return flags.size ? `/discovery?${flags}` : "/discovery";
+}
+// 開關會讓探索的 query key 帶上參數，失效時要用前綴比對。
+const isDiscoveryQuery = (q: { queryKey: readonly unknown[] }) =>
+  String(q.queryKey[0]).startsWith("/discovery");
 function Discover() {
-  const query = useData<Card[]>("/discovery");
+  const query = useData<Card[]>(discoveryPath(useSearchParams()));
   const profile = useData<Profile | null>("/profile");
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -1047,8 +1060,7 @@ function Discover() {
         action,
       });
       setMatch(result.matched);
-      await client.invalidateQueries({ queryKey: ["/discovery"] });
-      await client.invalidateQueries({ queryKey: ["/discovery/search"] });
+      await client.invalidateQueries({ predicate: isDiscoveryQuery });
       await client.invalidateQueries({ queryKey: ["/matches"] });
       await client.invalidateQueries({ queryKey: ["/likes"] });
       await client.invalidateQueries({ queryKey: ["/conversations"] });
@@ -1609,7 +1621,7 @@ function ProfileForm({
         "PUT",
       );
       await client.invalidateQueries({ queryKey: ["/profile"] });
-      await client.invalidateQueries({ queryKey: ["/discovery"] });
+      await client.invalidateQueries({ predicate: isDiscoveryQuery });
       onSaved(
         onboarding
           ? "個人檔案已儲存，接著加入一張生活照。"
@@ -1959,7 +1971,7 @@ function PreferencesPage() {
             try {
               await send("/preferences", values, "PUT");
               await client.invalidateQueries({ queryKey: ["/preferences"] });
-              await client.invalidateQueries({ queryKey: ["/discovery"] });
+              await client.invalidateQueries({ predicate: isDiscoveryQuery });
               setSaved(true);
             } catch (e) {
               setError((e as Error).message);

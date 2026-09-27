@@ -707,22 +707,31 @@ test("刪掉大頭貼（軟刪除）會取消驗證標記；刪其他照片不�
     other: { id: "22222222-2222-4222-8222-222222222222", isAvatar: false },
   };
   for (const [name, photo] of Object.entries(photos)) {
-    // 使用者更新與照片更新的記錄。
+    // 使用者更新、照片更新、外貌向量刪除與排去算向量的記錄。
     const userUpdates = [];
     const photoUpdates = [];
+    const embeddingDeletes = [];
+    const queued = [];
     // 假的資料庫：查得到這張照片，刪除後還剩一張可以遞補。
     const db = {
       photo: {
         findFirst: async () => ({ ...photo, storageKey: `photos/${name}.jpg` }),
         update: async (args) => photoUpdates.push(args),
       },
+      appearanceEmbedding: {
+        deleteMany: async (args) => embeddingDeletes.push(args.where),
+      },
       user: { update: async (args) => userUpdates.push(args.data) },
       $executeRaw: async () => 0,
       $transaction: (fn) => fn(db),
     };
+    const rec = {
+      enqueueAppearance: async (next) => queued.push(next.storageKey),
+    };
     await new Profiles(
       db,
       fakeInfra(async () => null),
+      rec,
     ).removePhoto("user-1", photo.id);
     // 刪除是軟刪除：寫入 deletedAt 並取消主照片。
     assert.equal(photoUpdates[0].where.id, photo.id);
@@ -732,5 +741,8 @@ test("刪掉大頭貼（軟刪除）會取消驗證標記；刪其他照片不�
       userUpdates,
       name === "avatar" ? [{ isVerified: false }] : [],
     );
+    // 外貌向量一律硬刪；刪大頭貼時，遞補成主照片的那張要排去算向量。
+    assert.deepEqual(embeddingDeletes, [{ photoId: photo.id }]);
+    assert.deepEqual(queued, name === "avatar" ? [`photos/${name}.jpg`] : []);
   }
 });

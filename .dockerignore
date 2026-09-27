@@ -14,3 +14,5 @@
 **/coverage
 .DS_Store
 artifacts
+# ml/ 是本機的推薦實驗（沒進版控，含虛擬環境與照片），任何映像都用不到。
+ml

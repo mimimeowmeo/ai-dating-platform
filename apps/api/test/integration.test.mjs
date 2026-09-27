@@ -5,6 +5,7 @@ import { PrismaClient } from "@prisma/client";
 import { io } from "socket.io-client";
 import sharp from "sharp";
 import { Client } from "minio";
+import { Queue, Worker } from "bullmq";
 const base = process.env.TEST_API_URL || "http://127.0.0.1:3001/api/v1";
 const origin = new URL(base).origin;
 const db = new PrismaClient();
@@ -280,6 +281,16 @@ test(
         !(await request("/discovery", { user: a })).value.some(
           (p) => p.userId === c.id,
         ),
+      );
+      // 測試開關：關掉硬篩選後，距離不符的人也要看得到；兩個 AI 分數也關掉，順序才固定（最新註冊在前）。
+      assert.ok(
+        (
+          await request(
+            "/discovery?hardfilter=false&appearance=false&interest=false",
+            { user: a },
+          )
+        ).value.some((p) => p.userId === c.id),
+        "關掉硬篩選要看得到距離不符的人",
       );
       const publicB = discover.find((p) => p.userId === b.id);
       for (const privateKey of [
@@ -1027,6 +1038,15 @@ test("個人檔案必填：身高、自我介紹 20 字、想遇見的關係 1�
     await cleanup();
   }
 });
+// 每 200ms 讀一次，直到有值或逾時；背景工作（BullMQ）寫回資料庫需要一點時間。
+async function eventually(read, timeoutMs = 10000) {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (value || Date.now() > until) return value;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
 test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 20000 }, async () => {
   const origin = new URL(base).origin;
   try {
@@ -1081,11 +1101,168 @@ test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 200
       404,
       "被封鎖後原本的照片網址要失效",
     );
+    assert.ok(
+      !(
+        await request(
+          "/discovery?hardfilter=false&appearance=false&interest=false",
+          { user: a },
+        )
+      ).value.some((c) => c.userId === b.id),
+      "關掉硬篩選也不能看到封鎖自己的人",
+    );
     console.log("已驗證：照片簽章、竄改與封鎖後的存取控制。");
   } finally {
     await cleanup();
   }
 });
+// 外貌向量：推薦 worker 在線才把照片放進 rec-jobs；結果寫回（找不到臉也留一列、沒有向量）；
+// 刪照片 → 向量一起硬刪、下一張遞補成主照片再排一次；刪掉之後才到的結果不能寫回。
+// 本機開著真的推薦 worker 時用它；沒開（例如 CI）就在這裡模擬一個（含在線訊號），只處理這個測試的照片。
+test(
+  "外貌向量：worker 在線才排照片，結果寫回，刪照片一起刪",
+  { timeout: 60000 },
+  async () => {
+    const connection = {
+      url: process.env.REDIS_URL,
+      maxRetriesPerRequest: null,
+    };
+    const jobs = new Queue("rec-jobs", { connection });
+    const results = new Queue("rec-results", { connection });
+    const redis = await jobs.client;
+    const mine = new Set();
+    const received = [];
+    let fake;
+    try {
+      const user = await create("外貌甲");
+      const upload = async () => {
+        const image = await sharp({
+          create: {
+            width: 1600,
+            height: 1200,
+            channels: 3,
+            background: "#ccc",
+          },
+        })
+          .jpeg()
+          .toBuffer();
+        const data = new FormData();
+        data.append("file", new Blob([image], { type: "image/jpeg" }), "p.jpg");
+        const photo = (
+          await request("/profile/photos", {
+            method: "POST",
+            user,
+            body: data,
+            expected: 201,
+          })
+        ).value;
+        mine.add(photo.id);
+        return photo;
+      };
+      const row = (photoId) =>
+        db.appearanceEmbedding.findUnique({
+          where: { photoId },
+          select: { userId: true, modelVersion: true },
+        });
+      const stored = (photoId, modelVersion) =>
+        eventually(async () => {
+          const found = await row(photoId);
+          return found?.modelVersion === modelVersion ? found : null;
+        });
+      const empty = async (photoId) =>
+        (
+          await db.$queryRaw`SELECT embedding IS NULL AS empty FROM appearance_embeddings WHERE photo_id = ${photoId}::uuid`
+        )[0]?.empty;
+      const real = (await redis.exists("rec-worker:online")) > 0;
+      const first = await upload();
+      if (real)
+        assert.ok(
+          await eventually(() => row(first.id), 30000),
+          "推薦 worker 的結果要寫回",
+        );
+      else {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        assert.equal(
+          await jobs.getJob(`appearance-${first.id}`),
+          undefined,
+          "推薦 worker 沒在跑時不能把照片放進 Redis",
+        );
+        fake = new Worker(
+          "rec-jobs",
+          async (job) => {
+            if (!mine.has(job.data.photoId)) return;
+            const meta = await sharp(
+              Buffer.from(job.data.image, "base64"),
+            ).metadata();
+            received.push({
+              photoId: job.data.photoId,
+              size: [meta.width, meta.height],
+              format: meta.format,
+            });
+            await results.add("embed-appearance", {
+              photoId: job.data.photoId,
+              modelVersion: "integration-test-no-face",
+              embedding: null,
+            });
+          },
+          { connection },
+        );
+        await fake.waitUntilReady();
+        await redis.set("rec-worker:online", "1", "EX", 60);
+      }
+      const second = await upload();
+      await request(`/profile/photos/${first.id}`, {
+        method: "DELETE",
+        user,
+      });
+      assert.equal(await row(first.id), null, "刪照片要一起刪掉外貌向量");
+      assert.ok(
+        await eventually(() => row(second.id), 30000),
+        "遞補成主照片後要再排一次",
+      );
+      assert.equal(
+        await empty(second.id),
+        true,
+        "找不到臉也要留一列（沒有向量），補排才不會一直重送",
+      );
+      if (!real)
+        assert.deepEqual(
+          received.filter((job) => job.photoId === second.id),
+          [{ photoId: second.id, size: [1600, 1200], format: "jpeg" }],
+          "送去 worker 的是存在物件儲存的 JPEG 原檔",
+        );
+      const result = {
+        photoId: second.id,
+        modelVersion: "integration-test",
+        embedding: Array.from({ length: 512 }, (_, i) => (i === 0 ? 1 : 0)),
+      };
+      await results.add("embed-appearance", result);
+      assert.deepEqual(await stored(second.id, "integration-test"), {
+        userId: user.id,
+        modelVersion: "integration-test",
+      });
+      assert.equal(await empty(second.id), false);
+      await request(`/profile/photos/${second.id}`, {
+        method: "DELETE",
+        user,
+      });
+      assert.equal(await row(second.id), null, "刪照片要一起刪掉外貌向量");
+      await results.add("embed-appearance", result);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      assert.equal(await row(second.id), null, "照片刪掉後才到的結果不能寫回");
+      console.log(
+        `已驗證（${real ? "真的" : "模擬的"}推薦 worker）：外貌向量排程、寫回與刪除。`,
+      );
+    } finally {
+      if (fake) {
+        await redis.del("rec-worker:online");
+        await fake.close();
+      }
+      await jobs.close();
+      await results.close();
+      await cleanup();
+    }
+  },
+);
 test(
   "AI 推薦回覆：權限、請求紀錄、訊息來源標記",
   { timeout: 60000 },

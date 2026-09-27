@@ -177,8 +177,18 @@ export class ProductController {
     // 交給 Profiles.retry 判斷目前能不能驗證。
     return this.profiles.retry(r.userId);
   }
-  @Get("discovery") discovery(@Req() r: AuthRequest) {
-    return this.social.discovery(r.userId);
+  // 探索排序的測試開關：?hardfilter=false、?appearance=false、?interest=false 個別關掉，其他值一律當作開。
+  @Get("discovery") discovery(
+    @Req() r: AuthRequest,
+    @Query("hardfilter") hardFilter: unknown,
+    @Query("appearance") appearance: unknown,
+    @Query("interest") interest: unknown,
+  ) {
+    return this.social.discovery(r.userId, {
+      hardFilter: hardFilter !== "false",
+      appearance: appearance !== "false",
+      interest: interest !== "false",
+    });
   }
   // 測試用搜尋：GET /discovery/search?q=名稱或 email。
   @Get("discovery/search") search(

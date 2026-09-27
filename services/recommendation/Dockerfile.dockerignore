@@ -1,0 +1,17 @@
+**
+!services/
+!services/recommendation/
+!services/recommendation/requirements.txt
+!services/recommendation/requirements-nodeps.txt
+!services/recommendation/app/
+!services/recommendation/app/*.py
+!services/recommendation/appearance/
+!services/recommendation/appearance/*.py
+!services/recommendation/tools/
+!services/recommendation/tools/*.py
+!services/recommendation/tests/
+!services/recommendation/tests/*.py
+!services/recommendation/third_party/
+!services/recommendation/third_party/**
+**/__pycache__
+**/*.pyc
