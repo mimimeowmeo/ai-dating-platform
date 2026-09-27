@@ -99,19 +99,29 @@ console.log(
 );
 
 console.log("\n## 匯入流程留下的東西\n");
-const map = db("select count(*) from _map").trim();
-const foreign = db(
-  "select count(*) from information_schema.foreign_tables where foreign_table_schema='hl'",
-).trim();
+// _map 與 hl schema 只有匯入過真實資料的資料庫才有；CI 或全新的資料庫沒有，標成不適用。
+const hasMap = db("select to_regclass('public._map') is not null") === "t";
+const hasHl =
+  db("select exists (select 1 from pg_namespace where nspname='hl')") === "t";
 const userTraits = db("select count(*) from user_traits").trim();
 console.log("| 對象 | 現況 | 建議 |");
 console.log("|---|---|---|");
-console.log(
-  `| \`public._map\` | ${Number(map).toLocaleString()} 列（舊 id ↔ 新 uuid） | 回填完成後可刪，但刪掉就無法再對回舊資料 |`,
-);
-console.log(
-  `| \`hl\` schema（${foreign} 張外部表） | 匯入與回填的來源 | 同上 |`,
-);
+if (hasMap) {
+  const map = db("select count(*) from _map").trim();
+  console.log(
+    `| \`public._map\` | ${Number(map).toLocaleString()} 列（舊 id ↔ 新 uuid） | 回填完成後可刪，但刪掉就無法再對回舊資料 |`,
+  );
+} else
+  console.log("| `public._map` | 不適用（這個資料庫沒有跑過匯入流程） | — |");
+if (hasHl) {
+  const foreign = db(
+    "select count(*) from information_schema.foreign_tables where foreign_table_schema='hl'",
+  ).trim();
+  console.log(
+    `| \`hl\` schema（${foreign} 張外部表） | 匯入與回填的來源 | ${hasMap ? "同上" : "回填完成後可刪，但刪掉就無法再對回舊資料"} |`,
+  );
+} else
+  console.log("| `hl` schema | 不適用（這個資料庫沒有跑過匯入流程） | — |");
 console.log(
   `| \`user_traits\` | ${Number(userTraits).toLocaleString()} 列 | 🟢 使用中，畫面的「我的小熱愛」與配對條件都靠它 |`,
 );

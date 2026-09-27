@@ -24,10 +24,34 @@ curl -s localhost:8080/api/v1/health         # 預期 {"status":"ok","service":"
 ```
 
 - 驗收預設打 `http://localhost:8080`，資料庫查詢預設走 `docker exec heartlink-pg psql -d dating`。
-  要換環境用環境變數：`VERIFY_API_BASE`、`VERIFY_ORIGIN`、`VERIFY_PG_CONTAINER`、`VERIFY_PG_USER`、`VERIFY_PG_PASSWORD`、`VERIFY_PG_DATABASE`。
+  要換環境見下方的[驗其他 stack](#驗其他-stack)。
 - `VERIFY_ORIGIN` 必須與後端的 `WEB_ORIGIN` 一致，否則所有寫入請求都會被 `checkOrigin` 擋掉。
 - 驗收會建立測試帳號，一律使用 `e2e-<RUN_ID>-<用途>@example.test`，跑完由 `apps/api/test/cleanup-e2e.mjs` 依 `E2E_RUN_ID` 連同照片一起刪除。
-- 後端有限流：`/auth/*` 每個 IP 300 秒 20 次、每個帳號每分鐘 120 次請求。連續重跑會拿到 429，等視窗過了再跑。
+- 後端有限流：`/auth/*` 每個 IP 300 秒 20 次、每個帳號每分鐘 120 次請求。一鍵執行會在各段之間清掉 Redis 的 `rate:*` 計數；單獨連續重跑某一段會拿到 429，等視窗過了再跑。
+
+### 驗其他 stack
+
+例如在 worktree 起一套隔離的測試環境時，每個部分要各自指過去：
+
+| 部分                                   | 看哪個設定                                                                                     | 沒設時                                                  |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| API 檢查                               | `VERIFY_API_BASE`                                                                              | `http://localhost:8080/api/v1`                          |
+| `Origin` 標頭、畫面驗收開的瀏覽器      | `VERIFY_ORIGIN`                                                                                | `http://localhost:8080`                                 |
+| Playwright e2e                         | `E2E_BASE_URL`                                                                                 | 跟著 `VERIFY_ORIGIN`                                    |
+| 資料庫查詢                             | `VERIFY_PG_CONTAINER`、`VERIFY_PG_USER`、`VERIFY_PG_PASSWORD`、`VERIFY_PG_DATABASE`            | `heartlink-pg`／`heartlink`／`heartlink`／`dating`      |
+| 重置限流計數                           | `VERIFY_REDIS_CONTAINER`；其次是 `COMPOSE_PROJECT_NAME`／`COMPOSE_FILE`（交給 `docker compose`） | `VERIFY_PG_CONTAINER` 所在 compose 專案的 `redis` 容器 |
+| 清理測試帳號（`cleanup-e2e.mjs`）      | `.env` 的 `DATABASE_URL`、`S3_*`                                                               | —                                                       |
+
+- 清理只刪得到 `DATABASE_URL` 那個資料庫。一鍵執行開跑前會先經由站台（`E2E_BASE_URL`）註冊一個探測帳號、跑一次清理，再確認它登入不了；確認不了就不跑任何會建帳號的步驟，並印出留下的探測帳號與清理指令。
+- 範例：站台在 `:18080`、compose 專案叫 `hl-test`，worktree 的 `.env` 已指向同一套的資料庫與物件儲存。
+
+```bash
+VERIFY_API_BASE=http://localhost:18080/api/v1 \
+VERIFY_ORIGIN=http://localhost:18080 \
+VERIFY_PG_CONTAINER=hl-test-postgres-1 \
+VERIFY_PG_USER=dating VERIFY_PG_PASSWORD=<.env 的 POSTGRES_PASSWORD> VERIFY_PG_DATABASE=dating \
+pnpm verify
+```
 
 ## 一鍵執行
 
@@ -35,8 +59,9 @@ curl -s localhost:8080/api/v1/health         # 預期 {"status":"ok","service":"
 node scripts/with-env.mjs node scripts/verify/run-all.mjs
 ```
 
-會依序跑：API 端點 → 照片存取控制 → 雙人聊天與配對 → 畫面互動 → Playwright e2e → 清理測試帳號 → 印出冗餘報表。
-任何一段失敗都會在最後列出來，離開碼為 1。
+會依序跑：確認清理碰得到受測站台 → API 端點 → 照片存取控制 → 雙人聊天與配對 → 畫面互動 → 清理測試帳號 → Playwright e2e → 印出冗餘報表。
+Playwright 和 CI 一樣分 desktop、mobile 兩次跑，每次開跑前清限流計數、跑完清測試帳號；一次跑完的話，排在後面的 mobile 會撞到註冊限流（429）。
+任何一段失敗（含清理與報表）都會在最後列出來，離開碼為 1。
 
 單獨執行某一段：
 
@@ -163,6 +188,7 @@ node scripts/verify/redundancy-report.mjs
 ```
 
 輸出是 markdown，分成四段：各表筆數、舊欄位使用狀況、只寫不讀的欄位、匯入流程留下的東西，最後是資料完整性檢查（五個數字都該是 0）。
+沒跑過匯入流程的資料庫（例如 CI 或全新的 compose stack）沒有 `_map` 與 `hl` schema，那兩列會標「不適用」。
 
 目前已知的結論：
 
