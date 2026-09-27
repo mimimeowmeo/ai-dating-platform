@@ -23,6 +23,77 @@ export type Card = {
   // traits 資料表的 code：dating_goal 放 datingGoals，其餘類別放 traits。
   traits: string[];
   datingGoals: string[];
+  // 只有 GET /discovery?debug=explain 才有：這張卡為什麼出現（測試用）。
+  explain?: DiscoveryExplain;
+};
+// 探索頁的推薦依據（測試用）。分數與百分位都是 0～1。
+export type DiscoveryExplain = {
+  // recommended 推薦卡、exploration 未推薦卡、latest AI 排序失敗時退回最新註冊的順序
+  source: "recommended" | "exploration" | "latest";
+  position: number;
+  // 在整個候選池裡的排名（從 1 開始）與候選人數；recommendedCount 是這次清單裡推薦卡的張數。
+  rank: number;
+  poolSize: number;
+  recommendedCount: number;
+  score: number | null;
+  appearanceWeight: number | null;
+  appearance: {
+    percentile: number | null;
+    similarity: number | null;
+    penalty: number | null;
+    nearLike: number | null;
+    nearPass: number | null;
+    // 最像的那位喜歡過的人（測試畫面可以點名字並排比較照片）。
+    anchor: DiscoveryAnchor | null;
+  } | null;
+  interest: {
+    percentile: number | null;
+    score: number | null;
+    categories: {
+      category: string;
+      weight: number;
+      shared: string[];
+      union: number;
+      jaccard: number;
+    }[];
+  } | null;
+  sharedTags: string[];
+};
+export type DiscoveryAnchor = {
+  userId: string;
+  displayName: string;
+  age: number | null;
+  gender: string;
+  city: string;
+  photoUrl: string | null;
+};
+// 臉部區域，左右照畫面來分。
+export type FaceRegion =
+  "eyebrows" | "eyes" | "nose" | "lips" | "left_cheek" | "right_cheek" | "chin";
+// [x, y, w, h]，原始照片的像素。
+export type FaceBox = [number, number, number, number];
+// 兩張臉最像的部位（遮蔽法）：各部位遮住後外貌相似度下降多少，依下降量由大到小。
+export type AppearanceExplanation = {
+  similarity: number;
+  candidate: { width: number; height: number };
+  anchor: { width: number; height: number };
+  regions: {
+    name: FaceRegion;
+    drop: number;
+    dropCandidate: number;
+    dropAnchor: number;
+    candidate: FaceBox[];
+    anchor: FaceBox[];
+  }[];
+};
+// GET /discovery/explain-appearance（測試用）。pending 時每秒再問一次；
+// ready 時 result 是 null 代表有一張照片找不到臉部特徵點。框的座標以這裡回傳的兩張照片為準。
+export type AppearanceExplainState = {
+  status: "pending" | "ready";
+  result?: AppearanceExplanation | null;
+  anchorUserId: string;
+  candidatePhotoUrl: string;
+  anchorPhotoUrl: string;
 };
 // GET /discovery/search 的結果：多一份目前的狀態（我按過什麼、配對、偏好、封鎖）。
 export type SearchCard = Card & {

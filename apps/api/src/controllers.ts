@@ -28,7 +28,7 @@ import {
   fail,
 } from "./core";
 import { Profiles } from "./profiles";
-import { Social } from "./social";
+import { Social, discoveryOptions } from "./social";
 import { ReplySuggestions } from "./ai-reply";
 const upload = FileInterceptor("file", {
   limits: { fileSize: 8 * 1024 * 1024, files: 1 },
@@ -177,18 +177,16 @@ export class ProductController {
     // 交給 Profiles.retry 判斷目前能不能驗證。
     return this.profiles.retry(r.userId);
   }
-  // 探索排序的測試開關：?hardfilter=false、?appearance=false、?interest=false 個別關掉，其他值一律當作開。
-  @Get("discovery") discovery(
+  // 探索頁的測試參數 prefs、rank、debug（說明見 docs/testing/QUERY-PARAMS.md），不認得的參數或值回 400。
+  @Get("discovery") discovery(@Req() r: AuthRequest, @Query() query: unknown) {
+    return this.social.discovery(r.userId, discoveryOptions(query));
+  }
+  // 測試畫面「像在哪裡」：GET /discovery/explain-appearance?candidate=卡片上那個人的 id。
+  @Get("discovery/explain-appearance") explainAppearance(
     @Req() r: AuthRequest,
-    @Query("hardfilter") hardFilter: unknown,
-    @Query("appearance") appearance: unknown,
-    @Query("interest") interest: unknown,
+    @Query("candidate") candidate: unknown,
   ) {
-    return this.social.discovery(r.userId, {
-      hardFilter: hardFilter !== "false",
-      appearance: appearance !== "false",
-      interest: interest !== "false",
-    });
+    return this.social.explainAppearance(r.userId, candidate);
   }
   // 測試用搜尋：GET /discovery/search?q=名稱或 email。
   @Get("discovery/search") search(

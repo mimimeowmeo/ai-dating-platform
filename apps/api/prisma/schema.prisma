@@ -38,6 +38,8 @@ model User {
   styleFacets UserStyleFacet[]
   suggestionRequests AiSuggestionRequest[]
   appearanceEmbeddings AppearanceEmbedding[]
+  swipeLogs SwipeLog[] @relation("swipeLogViewer")
+  swipeLogTargets SwipeLog[] @relation("swipeLogTarget")
   @@map("users")
 }
 
@@ -147,6 +149,41 @@ model AppearanceEmbedding {
 // 外貌向量要扣掉的方向，目前只有 glasses（「戴眼鏡 − 沒戴眼鏡」的平均向量差）。
 // 用種子資料的 CelebA 標註算出來，不進版控，由 prisma/import-appearance.ts 匯入；
 // worker 算好的新向量寫回時，NestJS 用同 model_version 的方向扣掉（見 rec-jobs.ts）。
+// 每次在探索頁滑卡時，那張卡當下的推薦狀態：分數、推薦卡還是未推薦卡、第幾張。
+// 用來評估推薦準不準、調整比重，之後訓練個人化比重。只存分數，不存照片或向量；任一方刪除帳號時一起刪除。
+model SwipeLog {
+  id String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+  user User @relation("swipeLogViewer", fields: [userId], references: [id], onDelete: Cascade)
+  targetUserId String @map("target_user_id") @db.Uuid
+  target User @relation("swipeLogTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+  action String
+  // recommended 推薦卡、exploration 未推薦卡、latest 兩個 AI 分數都關（照最新註冊排）、
+  // search 測試用搜尋列、unknown 找不到當時的排序紀錄（例如超過 24 小時才滑）
+  source String
+  position Int?
+  rank Int?
+  poolSize Int? @map("pool_size")
+  score Float?
+  appearanceWeight Float? @map("appearance_weight")
+  appearancePercentile Float? @map("appearance_percentile")
+  appearanceSimilarity Float? @map("appearance_similarity")
+  passPenalty Float? @map("pass_penalty")
+  interestPercentile Float? @map("interest_percentile")
+  interestScore Float? @map("interest_score")
+  likeCount Int? @map("like_count")
+  swipeCount Int? @map("swipe_count")
+  hardFilter Boolean? @map("hard_filter")
+  appearanceOn Boolean? @map("appearance_on")
+  interestOn Boolean? @map("interest_on")
+  rankingVersion String? @map("ranking_version")
+  servedAt DateTime? @map("served_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([userId, createdAt])
+  @@index([targetUserId])
+  @@map("swipe_logs")
+}
+
 model AppearanceDirection {
   name String @id
   modelVersion String @map("model_version")

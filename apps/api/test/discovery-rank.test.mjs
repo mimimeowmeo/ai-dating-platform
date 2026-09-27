@@ -67,10 +67,12 @@ test("兩個都關或都算不出來時維持原本順序", () => {
 const {
   PASS_PENALTY_SCALE,
   passPenalty,
-  personalizedRatio,
   seededOrder,
-  interleave,
-  applyQuota,
+  EXPLORATION_EVERY,
+  buildQueue,
+  scoreCandidates,
+  explainInterest,
+  INTEREST_WEIGHTS,
   projectOut,
 } = require("../src/discovery-rank.ts");
 
@@ -88,15 +90,6 @@ test("略過扣分（PASS V2）：附近略過未滿 5 個不扣；附近有喜�
   assert.ok(passPenalty(20, 2, "man") < passPenalty(20, 1, "man"));
 });
 
-test("個人化名額：依按過的喜歡數 0～5+；興趣開著時至少 60%", () => {
-  assert.deepEqual(
-    [0, 1, 2, 3, 4, 5, 9].map((n) => personalizedRatio(n, false)),
-    [0, 0.6, 0.65, 0.7, 0.75, 0.8, 0.8],
-  );
-  assert.equal(personalizedRatio(0, true), 0.6);
-  assert.equal(personalizedRatio(5, true), 0.8);
-});
-
 test("固定種子的順序：同種子結果相同；少了某些人，其他人的相對順序不變", () => {
   const ids = Array.from({ length: 50 }, (_, i) => `u${i}`);
   const order = seededOrder(ids, "seed");
@@ -109,67 +102,99 @@ test("固定種子的順序：同種子結果相同；少了某些人，其他�
   );
 });
 
-test("穿插：30 張裡 6 張探索在第 5、10、15、20、25、30 張；第一張是個人化", () => {
-  const personalized = Array.from({ length: 24 }, (_, i) => `p${i}`);
-  const exploration = Array.from({ length: 6 }, (_, i) => `e${i}`);
-  const result = interleave(personalized, exploration);
+const ranked = Array.from(
+  { length: 40 },
+  (_, i) => `u${String(i).padStart(2, "0")}`,
+);
+const queue = (swipeCount, penalized = new Set()) =>
+  buildQueue(ranked, { limit: 30, swipeCount, seed: "s", penalized });
+const positions = (list, source) =>
+  list.flatMap((card, i) => (card.source === source ? [i + 1] : []));
+
+test("每 5 張推薦卡之後插 1 張未推薦卡，位置依已滑張數決定", () => {
+  assert.equal(EXPLORATION_EVERY, 6);
+  assert.deepEqual(positions(queue(0), "exploration"), [6, 12, 18, 24, 30]);
+  // 已滑 5 張：這次看到的第一張就是第 6 次滑卡，要是未推薦卡。
+  assert.deepEqual(positions(queue(5), "exploration"), [1, 7, 13, 19, 25]);
+  // 前端每滑一張就重抓、只顯示第一張：連續 18 次滑卡裡第 6、12、18 次是未推薦卡。
   assert.deepEqual(
-    result.flatMap((id, i) => (id.startsWith("e") ? [i + 1] : [])),
-    [5, 10, 15, 20, 25, 30],
-  );
-  assert.deepEqual(
-    result.filter((id) => id.startsWith("p")),
-    personalized,
+    Array.from({ length: 18 }, (_, n) => queue(n)[0].source).flatMap(
+      (source, n) => (source === "exploration" ? [n + 1] : []),
+    ),
+    [6, 12, 18],
   );
 });
 
-test("名額：個人化取排序最前面；探索先挑沒被扣分的人，不夠才用被扣分的人", () => {
-  const ranked = Array.from(
-    { length: 40 },
-    (_, i) => `u${String(i).padStart(2, "0")}`,
-  );
-  const penalized = new Set(ranked.slice(24, 38));
-  const result = applyQuota(ranked, {
-    limit: 30,
-    ratio: 0.8,
-    seed: "s",
-    penalized,
-  });
-  assert.equal(result.length, 30);
+test("推薦卡照排名依序放；未推薦卡從推薦卡之後的排名挑，先挑沒被扣分的人", () => {
+  const penalized = new Set(ranked.slice(25, 38));
+  const list = queue(0, penalized);
+  assert.equal(list.length, 30);
   assert.deepEqual(
-    result.filter((id) => ranked.indexOf(id) < 24),
-    ranked.slice(0, 24),
+    list.filter((c) => c.source === "recommended").map((c) => c.userId),
+    ranked.slice(0, 25),
   );
-  const exploration = result.filter((id) => ranked.indexOf(id) >= 24);
-  assert.equal(exploration.length, 6);
+  const exploration = list
+    .filter((c) => c.source === "exploration")
+    .map((c) => c.userId);
+  assert.ok(exploration.every((id) => ranked.indexOf(id) >= 25));
   assert.equal(
     exploration.filter((id) => penalized.has(id)).length,
-    4,
-    "只有 2 個沒被扣分的人，其餘 4 個才從被扣分的人補",
+    3,
+    "只有 2 個沒被扣分的人，其餘 3 個才從被扣分的人補",
+  );
+  assert.deepEqual(queue(0, penalized), list, "同樣的種子，挑到的人不變");
+});
+
+test("候選人不滿 30 人時照樣穿插，不會重複也不會漏人", () => {
+  const small = ["a", "b", "c", "d", "e", "f", "g"];
+  const list = buildQueue(small, {
+    limit: 30,
+    swipeCount: 5,
+    seed: "s",
+    penalized: new Set(),
+  });
+  assert.deepEqual(positions(list, "exploration"), [1, 7]);
+  assert.deepEqual(list.map((c) => c.userId).sort(), small);
+  assert.deepEqual(
+    list.filter((c) => c.source === "recommended").map((c) => c.userId),
+    small.slice(0, 5),
   );
 });
 
-test("名額：候選人不滿 30 人時照比例縮小；比例 0 時全部是探索", () => {
-  const ranked = ["a", "b", "c", "d", "e"];
-  assert.equal(
-    applyQuota(ranked, {
-      limit: 30,
-      ratio: 0.6,
-      seed: "s",
-      penalized: new Set(),
-    }).length,
-    5,
-  );
-  assert.deepEqual(
-    [
-      ...applyQuota(ranked, {
-        limit: 30,
-        ratio: 0,
-        seed: "s",
-        penalized: new Set(),
-      }),
-    ].sort(),
-    ranked,
+test("合併分數：回傳排序、各自的百分位與最後分數", () => {
+  const scored = scoreCandidates(ids, appearance, interest);
+  assert.deepEqual(scored.ranked, ["a", "c", "b", "d"]);
+  assert.equal(scored.appearanceWeight, 0.6);
+  assert.equal(scored.appearancePct.get("a"), 1);
+  assert.equal(scored.interestPct.get("c"), 1);
+  assert.ok(Math.abs(scored.score.get("a") - 0.8) < 1e-12);
+  const none = scoreCandidates(ids, null, null);
+  assert.equal(none.score, null);
+  assert.equal(none.appearanceWeight, null);
+});
+
+test("標籤比較：各類的共同標籤、聯集與 Jaccard，加權後就是興趣分數", () => {
+  const mine = [
+    { category: "interest", code: "hiking" },
+    { category: "interest", code: "coffee" },
+    { category: "diet", code: "likes_hotpot" },
+  ];
+  const theirs = [
+    { category: "interest", code: "coffee" },
+    { category: "interest", code: "reading" },
+    { category: "diet", code: "likes_hotpot" },
+    { category: "personality", code: "humorous" },
+  ];
+  const parts = explainInterest(mine, theirs);
+  const byCategory = Object.fromEntries(parts.map((p) => [p.category, p]));
+  assert.deepEqual(byCategory.interest.shared, ["coffee"]);
+  assert.equal(byCategory.interest.union, 3);
+  assert.equal(byCategory.diet.jaccard, 1);
+  assert.equal(byCategory.personality.jaccard, 0);
+  const total = parts.reduce((sum, p) => sum + p.weight * p.jaccard, 0);
+  assert.ok(
+    Math.abs(total - (INTEREST_WEIGHTS.interest / 3 + INTEREST_WEIGHTS.diet)) <
+      1e-12,
   );
 });
 

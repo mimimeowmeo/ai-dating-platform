@@ -41,6 +41,8 @@ docker compose --profile recommendation up -d recommendation-worker
 | --- | --- | --- | --- |
 | `rec-jobs` | NestJS → worker | `embed-appearance` | `{photoId, image}`，image 是主照片的 JPEG 原檔（base64；上傳時已轉成長邊 1600px 以內） |
 | `rec-results` | worker → NestJS | `embed-appearance` | `{photoId, modelVersion, embedding}`，找不到臉時 embedding 是 `null` |
+| `rec-jobs` | NestJS → worker | `explain-appearance` | `{requestId, candidate, anchor, direction?, directionVersion?}`：卡片上的人、喜歡過最像的人兩張主照片原檔，加上戴眼鏡方向 |
+| `rec-results` | worker → NestJS | `explain-appearance` | `{requestId, result}`：各臉部區域遮住後相似度下降多少與框的座標；任一張找不到臉時是 `null` |
 
 - **在線訊號**：worker 每 20 秒寫 `rec-worker:online`（60 秒過期），關閉時先刪掉。NestJS 看到它才排照片，所以 worker 沒在跑時照片不會堆在 Redis。
   不用 BullMQ 的 `getWorkers()`：Node 版用 base64 的佇列名稱辨識 worker 連線，Python 版的名稱對不上。
@@ -51,6 +53,23 @@ docker compose --profile recommendation up -d recommendation-worker
   找不到臉的照片也會記一列（向量是空的），不會一直重排。
 - **錯誤**：只丟固定代碼 `UNSUPPORTED_JOB`、`INVALID_JOB_INPUT`、`INVALID_IMAGE`，日誌不帶 job 內容。
 
+## 測試畫面「像在哪裡」（`explain-appearance`）
+
+探索頁 `?debug=explain` 點「最像你喜歡過的 ○○」並排比較兩張照片時才排這個 job，用遮蔽法（occlusion）標出兩張臉最像的部位：
+
+1. 兩張照片照線上流程去背、算向量、扣掉戴眼鏡方向，得到整體相似度（和探索頁顯示的相同）。
+2. 用臉部特徵點圍出 7 個區域：眉毛、眼睛、鼻子、嘴唇、左右臉頰（顴骨）、下巴。左右照畫面來分。
+3. 每個區域各自塗成灰色重算相似度；下降越多，代表模型越依賴這一塊判斷「像」。兩張臉各遮一次取平均。
+4. 框的座標換回原始照片的像素，前端疊在照片上。
+
+| 模型 | 用途 | 授權 |
+| --- | --- | --- |
+| MediaPipe Face Landmarker `face_landmarker.task`（float16 v1，內含 BlazeFace 短距離版、FaceMesh-V2、Blendshape V2） | 臉上 478 個特徵點，圍出區域 | Apache-2.0（三張模型卡都寫明） |
+
+- 只給測試畫面用；結果只在 Redis 快取 1 小時，不寫資料庫。
+- 下降量是「模型的判斷依據」，不是「五官真的長得一樣」：CLIP 看的是整張去背後的臉，遮掉一塊時也會影響周圍的特徵。
+- 一次要算 16 個向量（兩張原圖 + 7 區 × 2）：本機 CPU 實測一組 1.5–1.9 秒（2026-09-28，同一組照片跑 3 次）。
+
 ## 測試
 
 ```bash
@@ -59,9 +78,10 @@ docker compose --profile recommendation run --rm --no-deps recommendation-worker
 
 | 檔案 | 內容 |
 | --- | --- |
-| `tests/test_cutout.py` | 去背規則：留臉與眼鏡、不留頭帶、找不到臉或範圍太大就退回橢圓裁切 |
-| `tests/test_worker.py` | 先清掉照片再處理、輸入驗證、錯誤只丟固定代碼、在線訊號 |
-| `tests/test_real_models.py` | 用映像裡的真模型：空白圖找不到臉、壞檔判為無效圖片、版本字串 |
+| `tests/test_cutout.py` | 去背規則：留臉與眼鏡、不留頭帶、找不到臉或範圍太大就退回橢圓裁切；去背後的臉換回原圖座標 |
+| `tests/test_explain.py` | 「像在哪裡」：區域怎麼圍（左右照畫面）、遮住塗灰、框換回原圖座標、下降量排序 |
+| `tests/test_worker.py` | 先清掉照片再處理、輸入驗證、錯誤只丟固定代碼、在線訊號；`explain-appearance` 同樣規則，戴眼鏡方向版本不同就不扣 |
+| `tests/test_real_models.py` | 用映像裡的真模型：空白圖找不到臉、壞檔判為無效圖片、版本字串（向量與「像在哪裡」都測） |
 
 NestJS 端的整合測試在 `apps/api/test/integration.test.mjs`（「外貌向量：worker 在線才排照片…」）：本機開著 worker 時用真的，沒開時測試自己模擬一個。
 

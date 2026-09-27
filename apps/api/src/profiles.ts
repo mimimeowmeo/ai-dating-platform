@@ -19,6 +19,7 @@ import {
   uuid,
 } from "./core";
 import { RecJobs } from "./rec-jobs";
+import { preferenceHeightRange } from "./eligibility";
 const gender = z.enum(["woman", "man", "nonbinary"]);
 // 送給 AI 服務的身分參照影像：base64 編碼的 JPEG（使用者的第一張主照片，縮圖後）。
 type ReferenceImage = { imageBase64: string; mimeType: "image/jpeg" };
@@ -93,8 +94,6 @@ const bioMinLength = 20;
 // 以使用者看到的字（grapheme）計算：❤️、👍🏻、國旗都算一個字，跟畫面上的計數一致。
 const graphemes = new Intl.Segmenter("zh-Hant", { granularity: "grapheme" });
 const charCount = (text: string) => [...graphemes.segment(text)].length;
-// 探索偏好的身高拉桿範圍；停在兩端代表不限（見 Social.eligible）。
-export const preferenceHeightRange = [130, 250] as const;
 const datingGoalMessage = "想遇見的關係請選 1～2 項";
 const traitMinimums: Record<string, { title: string; min: number }> = {
   personality: { title: "個性", min: 1 },

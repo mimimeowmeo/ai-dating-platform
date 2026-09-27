@@ -26,6 +26,7 @@ import { MessageOrigins } from "./ai-origins";
 import { ReplySuggestions } from "./ai-reply";
 import { VectorStore } from "./ai-store";
 import { RecJobs } from "./rec-jobs";
+import { SwipeLogs } from "./swipe-logs";
 @Module({
   controllers: [AuthController, HealthController, ProductController],
   providers: [
@@ -48,6 +49,8 @@ import { RecJobs } from "./rec-jobs";
     ReplySuggestions,
     // 探索頁的外貌向量：新的主照片排給推薦 worker 算，結果寫回 appearance_embeddings。
     RecJobs,
+    // 滑卡當下的推薦狀態，寫進 swipe_logs。
+    SwipeLogs,
   ],
 })
 class AppModule {}

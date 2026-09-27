@@ -1,6 +1,7 @@
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { PrismaClient } from "@prisma/client";
 import { io } from "socket.io-client";
 import sharp from "sharp";
@@ -9,6 +10,10 @@ import { Queue, Worker } from "bullmq";
 const base = process.env.TEST_API_URL || "http://127.0.0.1:3001/api/v1";
 const origin = new URL(base).origin;
 const db = new PrismaClient();
+const require = createRequire(import.meta.url);
+require("ts-node/register/transpile-only");
+// 雙向偏好篩選的程式版；探索頁用的是 SQL 版（同一個檔案），下面拿兩者的結果比對。
+const { eligible } = require("../src/eligibility.ts");
 const accounts = [];
 const password = `Test-${randomUUID()}-safe`;
 // 個人檔案的必填欄位：身高、20 字以上的自我介紹、想遇見的關係 1～2 項、
@@ -117,6 +122,48 @@ async function create(name) {
     },
   });
   return user;
+}
+// 探索頁的候選池（SQL）要和 eligible() 逐一判斷全部使用者的結果相同，而且不限註冊時間：
+// 比對 ?debug=explain 回傳的候選人數，並確認回傳的卡片都在程式版的名單裡。
+async function assertPoolMatchesEligible(user) {
+  const include = {
+    profile: true,
+    preference: true,
+    traits: { include: { trait: true } },
+  };
+  const [me, everyone, sent, blocks, matches] = await Promise.all([
+    db.user.findUnique({ where: { id: user.id }, include }),
+    db.user.findMany({ where: { id: { not: user.id } }, include }),
+    db.interaction.findMany({
+      where: { fromUserId: user.id },
+      select: { toUserId: true },
+    }),
+    db.block.findMany({
+      where: { OR: [{ userId: user.id }, { blockedUserId: user.id }] },
+    }),
+    db.match.findMany({
+      where: { OR: [{ userAId: user.id }, { userBId: user.id }] },
+    }),
+  ]);
+  const skip = new Set([
+    ...sent.map((s) => s.toUserId),
+    ...blocks.flatMap((b) => [b.userId, b.blockedUserId]),
+    ...matches.flatMap((m) => [m.userAId, m.userBId]),
+  ]);
+  const expected = new Set(
+    everyone
+      .filter((u) => !skip.has(u.id) && eligible(me, u) && eligible(u, me))
+      .map((u) => u.id),
+  );
+  const cards = (await request("/discovery?debug=explain", { user })).value;
+  assert.equal(
+    cards[0]?.explain.poolSize ?? 0,
+    expected.size,
+    "探索頁的候選池要和 eligible() 逐一判斷全部使用者的結果一樣多",
+  );
+  for (const card of cards)
+    assert.ok(expected.has(card.userId), "卡片上的人都要符合雙向偏好");
+  return expected.size;
 }
 // 走前端現在的即時鏡頭流程：領挑戰 → 送正面＋每個動作各一張影格。
 async function liveVerify(user, frame) {
@@ -253,6 +300,49 @@ test(
       const discover = (await request("/discovery", { user: a })).value;
       assert.ok(discover.some((p) => p.userId === b.id));
       assert.ok(!discover.some((p) => p.userId === a.id));
+      await assertPoolMatchesEligible(a);
+      // 探索頁的測試參數（docs/testing/QUERY-PARAMS.md）：不認得的參數或值回 400，舊名字提示新寫法。
+      for (const [query, hint] of [
+        ["rank=foo", "rank 只能是"],
+        ["rank=", "rank 至少要選一個"],
+        ["prefs=maybe", "prefs 只能是"],
+        ["debug=verbose", "debug 只能是"],
+        ["colour=red", "不認得的參數：colour"],
+        ["hardfilter=false", "prefs=off"],
+        ["test=true", "debug=explain"],
+      ])
+        assert.match(
+          (await request(`/discovery?${query}`, { user: a, expected: 400 }))
+            .value.message,
+          new RegExp(hint),
+          query,
+        );
+      const tagsOnly = (
+        await request("/discovery?rank=tags&debug=explain", { user: a })
+      ).value;
+      assert.ok(
+        tagsOnly.length &&
+          tagsOnly.every(
+            (p) => p.explain.appearance === null && p.explain.interest,
+          ),
+        "rank=tags 只用個人標籤",
+      );
+      assert.ok(
+        (
+          await request("/discovery?rank=face&debug=explain", { user: a })
+        ).value.every((p) => p.explain.interest === null),
+        "rank=face 不看個人標籤",
+      );
+      const bothSignals = (
+        await request("/discovery?rank=face&rank=tags&debug=explain,search", {
+          user: a,
+        })
+      ).value;
+      assert.ok(
+        bothSignals.length &&
+          bothSignals.every((p) => p.explain.appearance && p.explain.interest),
+        "rank 可以用重複參數多選；debug 可以用逗號多選",
+      );
       const distantProfile = {
         displayName: "測試丙",
         birthDate: "1997-05-10",
@@ -282,15 +372,13 @@ test(
           (p) => p.userId === c.id,
         ),
       );
-      // 測試開關：關掉硬篩選後，距離不符的人也要看得到；兩個 AI 分數也關掉，順序才固定（最新註冊在前）。
+      // 測試參數：prefs=off 不套用偏好篩選，距離不符的人也要看得到。只看個人標籤（rank=tags）：
+      // 測試帳號的標籤都一樣，會排在最前面，不會被種子帳號擠出 30 張之外。
       assert.ok(
         (
-          await request(
-            "/discovery?hardfilter=false&appearance=false&interest=false",
-            { user: a },
-          )
+          await request("/discovery?prefs=off&rank=tags", { user: a })
         ).value.some((p) => p.userId === c.id),
-        "關掉硬篩選要看得到距離不符的人",
+        "prefs=off 要看得到距離不符的人",
       );
       const publicB = discover.find((p) => p.userId === b.id);
       for (const privateKey of [
@@ -317,6 +405,7 @@ test(
           (p) => p.userId === b.id,
         ),
       );
+      await assertPoolMatchesEligible(a);
       await request("/preferences", {
         method: "PUT",
         user: b,
@@ -366,6 +455,20 @@ test(
         (await request("/auth/me", { user: a })).value.isVerified,
         false,
       );
+      // 滑卡紀錄：探索頁會記下每張卡當下的推薦狀態；debug=explain 才附上推薦依據。
+      assert.equal(
+        (await request("/discovery", { user: a })).value[0].explain,
+        undefined,
+        "沒帶 debug=explain 不附推薦依據",
+      );
+      const shownB = (
+        await request("/discovery?debug=explain", { user: a })
+      ).value.find((p) => p.userId === b.id);
+      assert.ok(shownB.explain.interest, "興趣開著要附上興趣的依據");
+      assert.ok(
+        shownB.explain.sharedTags.length > 0,
+        "甲乙的標籤相同，要標出共同的標籤",
+      );
       await Promise.all([
         request("/interactions", {
           method: "POST",
@@ -384,6 +487,23 @@ test(
       assert.equal(matches.length, 1);
       const match = matches[0],
         conversationId = match.conversationId;
+      const [liked] = await db.swipeLog.findMany({
+        where: { userId: a.id, targetUserId: b.id },
+      });
+      assert.equal(liked.action, "like");
+      assert.equal(liked.source, shownB.explain.source);
+      assert.equal(liked.position, shownB.explain.position);
+      assert.equal(liked.interestOn, true);
+      assert.ok(liked.rankingVersion);
+      assert.equal(
+        (
+          await db.swipeLog.findFirst({
+            where: { userId: b.id, targetUserId: a.id },
+          })
+        ).source,
+        "unknown",
+        "乙沒打開過探索頁，對不到當時的推薦狀態",
+      );
       await request("/interactions", {
         method: "POST",
         user: a,
@@ -391,6 +511,24 @@ test(
         expected: 201,
       });
       assert.equal((await request("/matches", { user: a })).value.length, 1);
+      assert.equal(
+        await db.swipeLog.count({
+          where: { userId: a.id, targetUserId: b.id },
+        }),
+        1,
+        "已配對時再按喜歡不會寫入，也不記滑卡紀錄",
+      );
+      await request("/discovery/search/interactions", {
+        method: "POST",
+        user: a,
+        body: { targetUserId: c.id, action: "pass" },
+        expected: 201,
+      });
+      const searched = await db.swipeLog.findFirst({
+        where: { userId: a.id, targetUserId: c.id },
+      });
+      assert.equal(searched.source, "search", "從測試用搜尋列滑的記成 search");
+      assert.equal(searched.score, null);
       await request(`/conversations/${conversationId}/messages`, {
         user: c,
         expected: 404,
@@ -1047,8 +1185,18 @@ async function eventually(read, timeoutMs = 10000) {
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
-test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 20000 }, async () => {
+// 也測「像在哪裡」（GET /discovery/explain-appearance）的存取控制與結果：本機開著真的推薦 worker 時用它
+// （空白照片找不到臉，結果是 null）；沒開就先確認回 503，再模擬一個只處理這次請求的 worker。
+test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 60000 }, async () => {
   const origin = new URL(base).origin;
+  const connection = {
+    url: process.env.REDIS_URL,
+    maxRetriesPerRequest: null,
+  };
+  const results = new Queue("rec-results", { connection });
+  const redis = await results.client;
+  let fake;
+  let explainKey;
   try {
     const a = await create("照片甲");
     const b = await create("照片乙");
@@ -1090,6 +1238,99 @@ test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 200
     assert.ok(card?.photos?.[0]?.url, "探索卡片要帶出照片網址");
     const seen = `${origin}${card.photos[0].url}`;
     assert.equal((await fetch(seen)).status, 200);
+    const explain = (candidate, expected = 200) =>
+      request(`/discovery/explain-appearance?candidate=${candidate}`, {
+        user: a,
+        expected,
+      });
+    await explain("abc", 400);
+    await explain(randomUUID(), 404);
+    await explain(b.id, 404); // 兩人都沒有外貌向量，這張卡沒有「最像的人」
+    // 「最像的人」要從外貌向量排出來；這裡直接改 API 存在 Redis 的清單狀態，把 b 那張卡的最像的人設成 a。
+    const own = new FormData();
+    own.append("file", new Blob([jpeg], { type: "image/jpeg" }), "p.jpg");
+    const anchorPhoto = await request("/profile/photos", {
+      method: "POST",
+      user: a,
+      body: own,
+      expected: 201,
+    });
+    const servedKey = `discovery:served:${a.id}`;
+    await redis.hset(
+      servedKey,
+      b.id,
+      JSON.stringify({
+        ...JSON.parse(await redis.hget(servedKey, b.id)),
+        anchorId: a.id,
+      }),
+    );
+    const requestId = `${uploaded.value.id}:${anchorPhoto.value.id}`;
+    explainKey = `rec:explain:${requestId}`;
+    const box = [40, 80, 30, 10];
+    const fakeResult = {
+      similarity: 0.9,
+      candidate: { width: 128, height: 128 },
+      anchor: { width: 128, height: 128 },
+      regions: [
+        {
+          name: "lips",
+          drop: 0.02,
+          dropCandidate: 0.01,
+          dropAnchor: 0.03,
+          candidate: [box],
+          anchor: [box],
+        },
+      ],
+    };
+    const real = (await redis.exists("rec-worker:online")) > 0;
+    if (!real) {
+      assert.equal((await explain(b.id, 503)).value.code, "REC_WORKER_OFFLINE");
+      fake = new Worker(
+        "rec-jobs",
+        async (job) => {
+          if (job.data.requestId !== requestId) return;
+          assert.ok(job.data.candidate && job.data.anchor, "要送兩張照片");
+          await results.add("explain-appearance", {
+            requestId,
+            result: fakeResult,
+          });
+        },
+        { connection },
+      );
+      await fake.waitUntilReady();
+      await redis.set("rec-worker:online", "1", "EX", 60);
+    }
+    assert.equal((await explain(b.id)).value.status, "pending");
+    const ready = await eventually(async () => {
+      const state = (await explain(b.id)).value;
+      return state.status === "ready" ? state : null;
+    }, 30000);
+    assert.ok(ready, "worker 算好後要拿到結果");
+    assert.equal(ready.anchorUserId, a.id);
+    assert.match(
+      ready.candidatePhotoUrl,
+      new RegExp(`/media/${uploaded.value.id}\\?`),
+    );
+    assert.match(
+      ready.anchorPhotoUrl,
+      new RegExp(`/media/${anchorPhoto.value.id}\\?`),
+    );
+    const expected = real ? null : fakeResult;
+    assert.deepEqual(ready.result, expected);
+    await results.add("explain-appearance", {
+      requestId,
+      result: {
+        ...fakeResult,
+        similarity: 0.1,
+        regions: [{ ...fakeResult.regions[0], name: "ears" }],
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.deepEqual(
+      (await explain(b.id)).value.result,
+      expected,
+      "格式不對的 worker 結果不能寫進快取",
+    );
     await request("/blocks", {
       method: "POST",
       user: b,
@@ -1103,15 +1344,21 @@ test("照片網址要簽章才讀得到，封鎖後立即失效", { timeout: 200
     );
     assert.ok(
       !(
-        await request(
-          "/discovery?hardfilter=false&appearance=false&interest=false",
-          { user: a },
-        )
+        await request("/discovery?prefs=off&rank=tags", { user: a })
       ).value.some((c) => c.userId === b.id),
-      "關掉硬篩選也不能看到封鎖自己的人",
+      "prefs=off 也不能看到封鎖自己的人",
     );
-    console.log("已驗證：照片簽章、竄改與封鎖後的存取控制。");
+    await explain(b.id, 404);
+    console.log(
+      `已驗證（${real ? "真的" : "模擬的"}推薦 worker）：照片簽章、竄改與封鎖後的存取控制；「像在哪裡」的權限與結果。`,
+    );
   } finally {
+    if (fake) {
+      await redis.del("rec-worker:online");
+      await fake.close();
+    }
+    if (explainKey) await redis.del(explainKey);
+    await results.close();
     await cleanup();
   }
 });

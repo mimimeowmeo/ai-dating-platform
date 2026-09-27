@@ -1,7 +1,22 @@
-// 探索頁 AI 推薦的純函式：排序、名額、略過扣分、向量方向；不碰資料庫，方便單元測試（test/discovery-rank.test.mjs）。
+// 探索頁 AI 推薦的純函式：排序、推薦卡與未推薦卡的穿插、略過扣分、向量方向；不碰資料庫，方便單元測試（test/discovery-rank.test.mjs）。
+
+/** 排序規則的版本，寫進滑卡紀錄；改了比重、穿插方式或扣分規則就要更新，之後才能分開比較。 */
+export const RANKING_VERSION = "2026-09-28.2";
 
 /** 外貌、興趣都開時外貌的比重（HeartLink Appearance Core V1：外貌 60%、興趣 40%）。 */
 export const APPEARANCE_WEIGHT = 0.6;
+
+/**
+ * 興趣分數五類標籤的權重（HeartLink Matching Core 的 PREFERENCE_WEIGHTS）。
+ * ai-store.ts 的 SQL 和測試畫面的推薦依據都用這一份。dating_goal 是硬篩選，不計分。
+ */
+export const INTEREST_WEIGHTS = {
+  interest: 0.7,
+  personality: 0.15,
+  lifestyle: 0.02,
+  value: 0.05,
+  diet: 0.08,
+} as const;
 
 /**
  * 每個分數在候選池裡的百分位（0～1，同分取平均名次）。
@@ -30,28 +45,79 @@ export function percentiles(
 }
 
 /**
- * 依外貌、興趣分數排序候選人。兩種分數先換成候選池裡的百分位再相加：
- * 都有時外貌 60%、興趣 40%，只有其中一種就是 100%。
+ * 依外貌、興趣分數排序候選人，並回傳各自的百分位與最後分數（滑卡紀錄、測試畫面用）。
+ * 兩種分數先換成候選池裡的百分位再相加：都有時外貌 60%、興趣 40%，只有其中一種就是 100%。
  * 外貌：沒有向量的候選人給中間值 0.5；分數整個是空的（例如還沒按過喜歡）就當作沒有外貌分數。
  * 興趣：沒有計分標籤的候選人算 0 分。
- * 兩種都沒有就維持傳進來的順序；同分也維持原順序（最新註冊在前）。
+ * 兩種都沒有就維持傳進來的順序、最後分數是 null；同分也維持原順序（最新註冊在前）。
  */
+export function scoreCandidates(
+  ids: string[],
+  appearance: Map<string, number> | null,
+  interest: Map<string, number> | null,
+) {
+  const appearancePct = appearance?.size ? percentiles(ids, appearance) : null;
+  const interestPct = interest ? percentiles(ids, interest, 0) : null;
+  if (!appearancePct && !interestPct)
+    return {
+      ranked: ids,
+      appearanceWeight: null,
+      appearancePct,
+      interestPct,
+      score: null,
+    };
+  const appearanceWeight =
+    appearancePct && interestPct ? APPEARANCE_WEIGHT : appearancePct ? 1 : 0;
+  const score = new Map(
+    ids.map((id) => [
+      id,
+      appearanceWeight * (appearancePct?.get(id) ?? 0) +
+        (1 - appearanceWeight) * (interestPct?.get(id) ?? 0),
+    ]),
+  );
+  return {
+    ranked: [...ids].sort((a, b) => score.get(b)! - score.get(a)!),
+    appearanceWeight,
+    appearancePct,
+    interestPct,
+    score,
+  };
+}
+
+/**
+ * 兩人各類標籤的比較（測試畫面的推薦依據用）：共同標籤、聯集大小、Jaccard，以及該類的權重。
+ * 算法和 ai-store.ts 的興趣分數 SQL 相同，各類 Jaccard × 權重加總就是興趣分數。
+ */
+export function explainInterest(
+  mine: { category: string; code: string }[],
+  theirs: { category: string; code: string }[],
+) {
+  return Object.entries(INTEREST_WEIGHTS).map(([category, weight]) => {
+    const a = new Set(
+      mine.filter((t) => t.category === category).map((t) => t.code),
+    );
+    const b = new Set(
+      theirs.filter((t) => t.category === category).map((t) => t.code),
+    );
+    const shared = [...b].filter((code) => a.has(code));
+    const union = new Set([...a, ...b]).size;
+    return {
+      category,
+      weight,
+      shared,
+      union,
+      jaccard: union ? shared.length / union : 0,
+    };
+  });
+}
+
+/** 只需要排序結果時用。 */
 export function rankCandidates(
   ids: string[],
   appearance: Map<string, number> | null,
   interest: Map<string, number> | null,
 ) {
-  const pa = appearance?.size ? percentiles(ids, appearance) : null;
-  const pi = interest ? percentiles(ids, interest, 0) : null;
-  if (!pa && !pi) return ids;
-  const weight = pa && pi ? APPEARANCE_WEIGHT : pa ? 1 : 0;
-  const score = new Map(
-    ids.map((id) => [
-      id,
-      weight * (pa?.get(id) ?? 0) + (1 - weight) * (pi?.get(id) ?? 0),
-    ]),
-  );
-  return [...ids].sort((a, b) => score.get(b)! - score.get(a)!);
+  return scoreCandidates(ids, appearance, interest).ranked;
 }
 
 /**
@@ -87,15 +153,6 @@ export function passPenalty(
   return Math.min(0.2, 0.25 * passes * (1 - protection)) * scale;
 }
 
-/**
- * 個人化名額比例（Appearance Core V1）：按過的喜歡 0／1／2／3／4／5 個以上 → 0／60／65／70／75／80%，
- * 其餘是探索名額。興趣分數開著時至少 60%：還沒按過喜歡，也能先靠興趣排。
- */
-export function personalizedRatio(likeCount: number, interestOn: boolean) {
-  const byLikes = [0, 0.6, 0.65, 0.7, 0.75, 0.8][Math.min(likeCount, 5)];
-  return interestOn ? Math.max(0.6, byLikes) : byLikes;
-}
-
 /** 字串雜湊（FNV-1a，32 位元）。 */
 function hash(text: string) {
   let h = 0x811c9dc5;
@@ -116,46 +173,51 @@ export function seededOrder(ids: string[], seed: string) {
 }
 
 /**
- * 把探索名額平均穿插進個人化名單。前端一次只顯示第一張，探索卡放在最後幾乎不會被看到；
- * 例如 30 張裡 6 張探索，就是第 5、10、15… 張。
+ * 每幾張卡放一張未推薦卡：每 5 張推薦卡之後插 1 張（使用者 2026-09-28 指定），
+ * 取代 Appearance Core V1 依喜歡數 40%→20% 的探索比例。
+ * 推薦卡：依合併分數，從排名最前面依序挑。
+ * 未推薦卡（探索卡）：從推薦卡之後的排名裡用固定種子隨機挑，讓使用者有機會看到其他類型。
  */
-export function interleave(personalized: string[], exploration: string[]) {
-  const total = personalized.length + exploration.length;
-  const result: string[] = [];
-  let p = 0;
-  let e = 0;
-  for (let slot = 0; slot < total; slot++) {
-    const explore =
-      Math.floor(((slot + 1) * exploration.length) / total) >
-      Math.floor((slot * exploration.length) / total);
-    if ((explore && e < exploration.length) || p >= personalized.length)
-      result.push(exploration[e++]);
-    else result.push(personalized[p++]);
-  }
-  return result;
-}
+export const EXPLORATION_EVERY = 6;
+
+export type QueueSource = "recommended" | "exploration";
 
 /**
- * 依名額組出最後的清單：個人化名額取排序最前面的人；探索名額從剩下的人裡用固定種子挑，
- * 先挑沒有被略過扣分的人（避開我常略過的長相），不夠再從被扣分的人補，最後平均穿插。
+ * 組出最後的清單。前端一次只顯示第一張、每滑一張就重抓，所以用「已滑張數」決定未推薦卡的位置：
+ * 清單第 n 張（從 1 開始）在「已滑張數 + n」是 EXPLORATION_EVERY 的倍數時放未推薦卡。
+ * 這樣第 6、12、18… 次滑卡看到的是未推薦卡；沒有滑卡、只是重新整理時，看到的還是同一張。
+ * 未推薦卡先挑沒有被略過扣分的人（避開我常略過的長相），不夠再從被扣分的人補。
  */
-export function applyQuota(
+export function buildQueue(
   ranked: string[],
   options: {
     limit: number;
-    ratio: number;
+    swipeCount: number;
     seed: string;
     penalized: Set<string>;
   },
 ) {
   const total = Math.min(options.limit, ranked.length);
-  const personal = Math.round(total * options.ratio);
-  const rest = seededOrder(ranked.slice(personal), options.seed);
+  const slots = new Set<number>();
+  for (let position = 1; position <= total; position++)
+    if ((options.swipeCount + position) % EXPLORATION_EVERY === 0)
+      slots.add(position);
+  const recommendedCount = total - slots.size;
+  const rest = seededOrder(ranked.slice(recommendedCount), options.seed);
   const exploration = [
     ...rest.filter((id) => !options.penalized.has(id)),
     ...rest.filter((id) => options.penalized.has(id)),
-  ].slice(0, total - personal);
-  return interleave(ranked.slice(0, personal), exploration);
+  ];
+  const queue: { userId: string; source: QueueSource }[] = [];
+  let r = 0;
+  let e = 0;
+  for (let position = 1; position <= total; position++)
+    queue.push(
+      slots.has(position)
+        ? { userId: exploration[e++], source: "exploration" }
+        : { userId: ranked[r++], source: "recommended" },
+    );
+  return queue;
 }
 
 /** 從向量扣掉某個方向（例如戴眼鏡）再正規化：v − (v·d)d，d 是單位向量。 */

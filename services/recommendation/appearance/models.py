@@ -1,4 +1,4 @@
-"""三個模型的薄包裝：YuNet 找臉、MediaPipe 分割、CLIP 算向量。
+"""模型的薄包裝：YuNet 找臉、MediaPipe 分割、CLIP 算向量，以及測試畫面用的 MediaPipe 臉部特徵點。
 
 模型檔在 build 時由 tools/fetch_models.py 下載並驗證 sha256，執行期不連網。
 這些物件都不是執行緒安全的，由 pipeline.AppearanceEmbedder 用鎖保護。
@@ -10,6 +10,7 @@ import numpy as np
 
 YUNET_FILE = "face_detection_yunet_2023mar.onnx"
 SEGMENTER_FILE = "selfie_multiclass_256x256.tflite"
+LANDMARKER_FILE = "face_landmarker.task"
 CLIP_DIR = "clip-vit-base-patch32"
 # 和 ml 實驗相同的偵測門檻；多張臉時取面積最大的一張。
 YUNET_SCORE = 0.6
@@ -50,6 +51,33 @@ class Segmenter:
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         mask = np.asarray(self._segmenter.segment(image).category_mask.numpy_view())
         return (mask[..., 0] if mask.ndim == 3 else mask).copy()
+
+
+class Landmarker:
+    """MediaPipe Face Landmarker：臉上 478 個點，給測試畫面找出眉毛、眼睛、鼻子、嘴唇等區域。"""
+
+    def __init__(self, models_dir: Path):
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_tasks
+        from mediapipe.tasks.python import vision
+
+        self._mp = mp
+        self.connections = vision.FaceLandmarksConnections
+        options = vision.FaceLandmarkerOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(models_dir / LANDMARKER_FILE)),
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=1,
+        )
+        self._landmarker = vision.FaceLandmarker.create_from_options(options)
+
+    def points(self, rgb: np.ndarray) -> np.ndarray | None:
+        """478 個點的像素座標 (x, y)；找不到臉回傳 None。"""
+        image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        result = self._landmarker.detect(image)
+        if not result.face_landmarks:
+            return None
+        height, width = rgb.shape[:2]
+        return np.array([[p.x * width, p.y * height] for p in result.face_landmarks[0]])
 
 
 class ClipEncoder:

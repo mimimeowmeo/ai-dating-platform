@@ -3,6 +3,9 @@
 - job 名稱：`embed-appearance`；data：`{photoId, image}`，image 是主照片在物件儲存裡的 JPEG 原檔（base64，上傳時已轉成長邊 1600px 以內）。
 - 結果：`{photoId, modelVersion, embedding}`；找不到臉時 embedding 是 null。由 NestJS 寫進資料庫
   （ADR 0002：Python 不碰資料庫），「扣掉戴眼鏡方向」也在 NestJS 做。
+- job 名稱：`explain-appearance`（測試畫面「像在哪裡」）；data：`{requestId, candidate, anchor, direction?, directionVersion?}`，
+  兩張主照片原檔。結果：`{requestId, result}`，result 是各臉部區域遮住後相似度下降多少與框的座標（見 appearance/explain.py），
+  任一張找不到臉時是 null。不寫資料庫，NestJS 只短暫快取在 Redis。
 - 佇列和 AI 服務的 ai-jobs／ai-results 分開：兩邊的 worker 遇到不認得的 job 都會直接失敗。
 
 隱私：取到 job 就把 Redis 裡的 data 覆寫成 {"redacted": True}，照片不留在 Redis；
@@ -29,12 +32,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from redis.exceptions import RedisError
 
 from appearance.pipeline import MODEL_VERSION, AppearanceEmbedder, InvalidImage
+from appearance.explain import REGIONS
 
 from .config import Settings
 
 QUEUE_NAME = "rec-jobs"
 RESULTS_QUEUE = "rec-results"
 JOB_NAME = "embed-appearance"
+EXPLAIN_JOB = "explain-appearance"
 HEARTBEAT_FILE = Path("/tmp/rec-worker-heartbeat")
 ONLINE_KEY = "rec-worker:online"
 ONLINE_TTL_SECONDS = 60
@@ -44,17 +49,34 @@ RESULT_JOB_OPTIONS = {"attempts": 5, "backoff": {"type": "exponential", "delay":
 MAX_IMAGE_BASE64 = 4 * 1024 * 1024
 
 
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
 class EmbedRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    photoId: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+    photoId: str = Field(pattern=rf"^{UUID}$")
     image: str = Field(min_length=1, max_length=MAX_IMAGE_BASE64)
+
+
+class ExplainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    # 卡片上的人與喜歡過的人的主照片 id，NestJS 用它當快取鍵。
+    requestId: str = Field(pattern=rf"^{UUID}:{UUID}$")
+    candidate: str = Field(min_length=1, max_length=MAX_IMAGE_BASE64)
+    anchor: str = Field(min_length=1, max_length=MAX_IMAGE_BASE64)
+    # 戴眼鏡方向；JSON 裡的 0 會是整數，所以這欄不用嚴格型別。
+    direction: list[float] | None = Field(default=None, min_length=512, max_length=512, strict=False)
+    directionVersion: str | None = Field(default=None, max_length=200)
 
 
 def make_processor(embedder: AppearanceEmbedder, results: Queue):
     async def process(job, _token):
         data = job.data
         await job.updateData({"redacted": True})
+        if job.name == EXPLAIN_JOB:
+            return await explain(data)
         if job.name != JOB_NAME:
             raise ValueError("UNSUPPORTED_JOB")
         try:
@@ -72,6 +94,22 @@ def make_processor(embedder: AppearanceEmbedder, results: Queue):
             RESULT_JOB_OPTIONS,
         )
         return {"ok": True, "faceFound": embedding is not None}
+
+    async def explain(data):
+        try:
+            request = ExplainRequest.model_validate(data)
+        except ValidationError:
+            raise ValueError("INVALID_JOB_INPUT") from None
+        # 方向和目前的模型同版本才扣，數字才會和存進資料庫的向量一致。
+        direction = request.direction if request.directionVersion == MODEL_VERSION else None
+        try:
+            candidate = base64.b64decode(request.candidate, validate=True)
+            anchor = base64.b64decode(request.anchor, validate=True)
+            result = await asyncio.to_thread(embedder.explain, candidate, anchor, direction)
+        except (binascii.Error, ValueError, InvalidImage):
+            raise ValueError("INVALID_IMAGE") from None
+        await results.add(EXPLAIN_JOB, {"requestId": request.requestId, "result": result}, RESULT_JOB_OPTIONS)
+        return {"ok": True, "explained": result is not None, "regions": len(REGIONS)}
 
     return process
 
