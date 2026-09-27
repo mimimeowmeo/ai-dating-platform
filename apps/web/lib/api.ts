@@ -113,12 +113,15 @@ export type ReplySuggestion = {
  * 按一次「AI 推薦回覆」的結果。
  * status：ok（3～5 則）／partial（1～2 則，notice 會說明原因）／empty（0 則）。
  * mode 是 AI 判斷的情境（開場、回覆、追問、重啟），前端只用來顯示提示語。
+ * canRegenerate：同一輪能不能「換一批」。目前固定是 false：同一輪再按會拿到同一批，
+ * 前端把按鈕鎖成「已推薦」，有人傳出新訊息才解鎖。
  */
 export type ReplySuggestionResult = {
   requestId: string;
   status: "ok" | "partial" | "empty";
   mode: "opener" | "reply" | "follow_up" | "revive";
   notice: string | null;
+  canRegenerate: boolean;
   suggestions: ReplySuggestion[];
 };
 export const useAuth = create<{

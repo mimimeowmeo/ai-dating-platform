@@ -7,6 +7,7 @@
 //   4. 呼叫 /reply-suggestions 產生 0～5 則推薦；呼叫期間在 Redis 標記「有人在等推薦」，
 //      讓背景 worker 先讓路（ai-priority.ts）。
 //   5. 把請求與「全部」推薦（含被刪掉的候選）寫進資料庫，再回傳前端。
+// 同一輪（最後一則訊息相同）已經產生過的話，讀完訊息就直接回傳同一批（「換一批」先鎖起來）。
 //
 // 向量化失敗時不讓整件事失敗：少了 RAG 的推薦仍然可用，只是少了舊話題的線索。
 import { Injectable } from "@nestjs/common";
@@ -31,6 +32,12 @@ const SUGGEST_PER_MINUTE = 30;
 const QUERY_MESSAGES = 6;
 /** 「換一批」時要避開的舊推薦則數上限（AI 服務的上限是 30）。 */
 const EXCLUDE_LIMIT = 30;
+/**
+ * 同一輪可不可以再要一批新的推薦（「換一批」）。「一輪」＝聊天室的最後一則訊息相同。
+ * 2026-09-28 使用者決定先鎖起來：每一輪只產生一次，再按會回傳同一批，不再呼叫模型；
+ * 有人傳出新訊息就是新的一輪。要恢復「換一批」時改成 true。
+ */
+const ALLOW_REGENERATE = false;
 
 @Injectable()
 export class ReplySuggestions {
@@ -79,6 +86,15 @@ export class ReplySuggestions {
         }),
       ]);
     const lastMessage = recentMessages.at(-1) ?? null;
+    // 這一輪已經產生過就回傳同一批（「換一批」先鎖起來）；重新整理頁面後再按也拿得回來。
+    if (!ALLOW_REGENERATE) {
+      const previous = await this.previousBatch(
+        conversationId,
+        userId,
+        lastMessage?.id ?? null,
+      );
+      if (previous) return previous;
+    }
 
     // --- 2～3. 查詢向量 → pgvector 檢索 --------------------------------
     // 沒有訊息（剛配對）時改用對方的自我介紹當查詢，至少能找到相關的特徵句。
@@ -214,7 +230,47 @@ export class ReplySuggestions {
       status: result.status,
       mode: result.mode,
       notice: result.notice ?? null,
+      canRegenerate: ALLOW_REGENERATE,
       suggestions: kept.map((suggestion) => ({
+        id: suggestion.id,
+        rank: suggestion.rank,
+        text: suggestion.text,
+        intent: suggestion.intent,
+      })),
+    };
+  }
+
+  /**
+   * 這一輪（依據同一則最後訊息）已經給過的推薦；沒有就回 null。
+   *
+   * 只看成功的請求（ok／partial／empty）：AI 服務失敗不算用掉這一輪，可以再按。
+   * 回傳格式跟新產生的一樣，推薦的 id 也沿用，送出時照樣能標記訊息來源（ai-origins.ts）。
+   */
+  private async previousBatch(
+    conversationId: string,
+    requesterId: string,
+    lastMessageId: string | null,
+  ) {
+    const row = await this.db.aiSuggestionRequest.findFirst({
+      where: {
+        conversationId,
+        requesterId,
+        lastMessageId,
+        status: { not: "error" },
+      },
+      orderBy: { createdAt: "desc" },
+      include: {
+        suggestions: { where: { rank: { gt: 0 } }, orderBy: { rank: "asc" } },
+      },
+    });
+    if (!row) return null;
+    return {
+      requestId: row.id,
+      status: row.status,
+      mode: row.mode,
+      notice: row.notice,
+      canRegenerate: ALLOW_REGENERATE,
+      suggestions: row.suggestions.map((suggestion) => ({
         id: suggestion.id,
         rank: suggestion.rank,
         text: suggestion.text,

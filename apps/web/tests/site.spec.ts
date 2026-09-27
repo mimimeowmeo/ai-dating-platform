@@ -250,11 +250,9 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
       b.locator(".bubble", { hasText: "等待中按 Enter 不能送出" }),
     ).toHaveCount(0);
     if (await chip.isVisible()) {
-      // 有建議時：第 1 則會被打字填進輸入框，點上方的按鈕可以換成另一則。
-      await expect(box).not.toHaveValue("");
-      const other = ((await chip.textContent()) ?? "").trim();
-      await chip.click();
-      await expect(box).toHaveValue(other);
+      // 有建議時：第 1 則打字填進輸入框，上方的按鈕也包含第 1 則；這一輪按鈕鎖成「已推薦」。
+      await expect(box).toHaveValue(((await chip.textContent()) ?? "").trim());
+      await expect(ai).toBeDisabled();
     }
     await box.fill("");
     await a.reload();
@@ -274,6 +272,61 @@ test("兩個瀏覽器帳號互讚，配對後收到即時訊息", async ({ brows
     await expect(
       b.locator(".bubble", { hasText: "登入續期後仍可聊天" }),
     ).toBeVisible();
+    // 同一輪只能推薦一次。用假的推薦結果測，不依賴 AI 服務（CI 沒有 ai 服務）。
+    // 對方剛傳了新訊息，所以這是新的一輪，按鈕是可以按的「AI 推薦」。
+    await expect(ai).toBeEnabled();
+    await expect(ai).toContainText("AI 推薦");
+    const fakeTexts = ["第一則推薦", "第二則推薦", "第三則推薦"];
+    let asked = 0;
+    await b.route("**/reply-suggestions", (route) => {
+      asked += 1;
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          requestId: randomUUID(),
+          status: "ok",
+          mode: "reply",
+          notice: null,
+          canRegenerate: false,
+          suggestions: fakeTexts.map((text, i) => ({
+            id: randomUUID(),
+            rank: i + 1,
+            text,
+            intent: "share",
+          })),
+        }),
+      });
+    });
+    await ai.click();
+    const chips = b.locator(".ai-chips button");
+    // 上方的按鈕包含第 1 則，而且第 1 則也打字填進輸入框、標成「目前用的這一則」。
+    await expect(chips).toHaveText(fakeTexts);
+    await expect(box).toHaveValue("第一則推薦");
+    await expect(chips.first()).toHaveAttribute("aria-pressed", "true");
+    // 點別則之後，還能點回第 1 則。
+    await chips.nth(1).click();
+    await expect(box).toHaveValue("第二則推薦");
+    await expect(chips.nth(1)).toHaveAttribute("aria-pressed", "true");
+    await expect(chips.first()).toHaveAttribute("aria-pressed", "false");
+    await chips.first().click();
+    await expect(box).toHaveValue("第一則推薦");
+    // 這一輪已經推薦過：按鈕鎖成「已推薦」，不能「換一批」。
+    await expect(ai).toBeDisabled();
+    await expect(ai).toContainText("已推薦");
+    expect(asked).toBe(1);
+    // 自己傳出新訊息就是新的一輪，按鈕解鎖、舊的建議收起來。
+    // 先清空再打字：假推薦的 id 不在資料庫裡，清空才不會帶著它送出。
+    await box.fill("");
+    await box.fill("自己打的下一句");
+    await b.getByRole("button", { name: "傳送訊息" }).click();
+    await expect(
+      a.locator(".bubble", { hasText: "自己打的下一句" }),
+    ).toBeVisible();
+    await expect(chips).toHaveCount(0);
+    await expect(ai).toBeEnabled();
+    await expect(ai).toContainText("AI 推薦");
+    await b.unroute("**/reply-suggestions");
   } finally {
     await Promise.all(contexts.map((c) => c.close()));
   }

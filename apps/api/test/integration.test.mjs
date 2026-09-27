@@ -1319,6 +1319,7 @@ test(
           suggested.suggestions.length,
           "回傳的推薦都要存檔",
         );
+        assert.equal(suggested.canRegenerate, false, "「換一批」目前鎖住");
       } else {
         assert.equal(asked.status, 503);
         assert.ok(
@@ -1328,6 +1329,76 @@ test(
         assert.equal(requestRow.status, "error");
         assert.ok(requestRow.errorCode, "要記下失敗代碼");
       }
+      // 同一輪只產生一次（「換一批」先鎖起來）。一輪＝聊天室的最後一則訊息相同。
+      // 不依賴 AI 服務：直接放一批「這一輪已經產生過」的推薦，再放一筆更新的失敗紀錄。
+      const turnMessage = await db.message.findFirst({
+        where: { conversationId },
+        orderBy: { createdAt: "desc" },
+      });
+      const earlier = await db.aiSuggestionRequest.create({
+        data: {
+          conversationId,
+          requesterId: a.id,
+          mode: "reply",
+          status: "partial",
+          notice: "只找到 2 則合適的建議",
+          lastMessageId: turnMessage.id,
+          suggestions: {
+            create: [
+              { rank: 2, text: "妳週末都怎麼過呢", intent: "question" },
+              { rank: 1, text: "我週末大多在打球，妳呢", intent: "answer" },
+              { rank: 0, text: "被刪掉的候選", rejectedReason: "DUPLICATE" },
+            ],
+          },
+        },
+        include: { suggestions: true },
+      });
+      await db.aiSuggestionRequest.create({
+        data: {
+          conversationId,
+          requesterId: a.id,
+          mode: "unknown",
+          status: "error",
+          errorCode: "LLM_UNAVAILABLE",
+          lastMessageId: turnMessage.id,
+        },
+      });
+      const requestsBefore = await db.aiSuggestionRequest.count({
+        where: { conversationId },
+      });
+      const again = await request(
+        `/conversations/${conversationId}/reply-suggestions`,
+        { method: "POST", user: a, expected: 201 },
+      );
+      const rankOf = (rank) => earlier.suggestions.find((s) => s.rank === rank);
+      assert.equal(
+        again.value.requestId,
+        earlier.id,
+        "同一輪再按要回傳同一批；後來失敗的請求不算用掉這一輪",
+      );
+      assert.deepEqual(
+        again.value.suggestions.map((s) => s.id),
+        [rankOf(1).id, rankOf(2).id],
+        "依名次排好，被刪掉的候選不回傳；id 沿用，送出時才能標記來源",
+      );
+      assert.equal(again.value.status, "partial");
+      assert.equal(again.value.mode, "reply");
+      assert.equal(again.value.notice, "只找到 2 則合適的建議");
+      assert.equal(again.value.canRegenerate, false);
+      assert.equal(
+        await db.aiSuggestionRequest.count({ where: { conversationId } }),
+        requestsBefore,
+        "回傳同一批時不呼叫 AI，也不新增請求紀錄",
+      );
+      // 鎖住的是「自己」這一輪：對方按推薦不會拿到 A 的那一批。
+      const partnerAsked = await fetch(
+        `${base}/conversations/${conversationId}/reply-suggestions`,
+        { method: "POST", headers: { Authorization: `Bearer ${b.token}` } },
+      );
+      const partnerBody = await partnerAsked.json();
+      if (partnerAsked.status === 201)
+        assert.notEqual(partnerBody.requestId, earlier.id);
+      else assert.equal(partnerAsked.status, 503);
       // 以下的來源標記不依賴 AI 服務：直接放一則推薦進資料庫，模擬剛剛產生過。
       const stored = await db.aiSuggestionRequest.create({
         data: {
@@ -1425,6 +1496,15 @@ test(
         null,
         "一般訊息不寫來源紀錄，查詢時視為 human",
       );
+      // 有人傳出新訊息就是新的一輪：A 再按不會拿到舊的那一批。
+      const nextTurn = await fetch(
+        `${base}/conversations/${conversationId}/reply-suggestions`,
+        { method: "POST", headers: { Authorization: `Bearer ${a.token}` } },
+      );
+      const nextBody = await nextTurn.json();
+      if (nextTurn.status === 201)
+        assert.notEqual(nextBody.requestId, earlier.id, "新的一輪要重新產生");
+      else assert.equal(nextTurn.status, 503);
       console.log(
         `已驗證：推薦權限、請求紀錄（${asked.status === 201 ? "AI 服務可用" : "AI 服務不可用時回 503"}）、ai_verbatim／ai_edited／human 判定與越權保護。`,
       );

@@ -2517,7 +2517,8 @@ function Chat({
   const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTyping = useRef(0);
   // ── AI 推薦回覆（docs/ai/REPLY-SUGGESTIONS-SPEC.md）──────────────────
-  // 第 1 則會打字填進輸入框，這裡放的是「其餘建議」，顯示成輸入框上方的按鈕。
+  // 這一批的全部建議（包含第 1 則），顯示成輸入框上方的按鈕。第 1 則同時會打字填進輸入框，
+  // 點過其他則之後還能點回第 1 則。
   const [suggestions, setSuggestions] = useState<ReplySuggestion[]>([]);
   // 等後端回應的期間：輸入框邊框跑彩光，AI 鈕與傳送鍵都停用。
   const [suggesting, setSuggesting] = useState(false);
@@ -2525,8 +2526,17 @@ function Chat({
   const [notice, setNotice] = useState("");
   // 目前輸入框的內容來自哪一則推薦；送出時一起帶給後端判斷訊息來源（規格 5.6）。
   const suggestionId = useRef<string | null>(null);
+  // 同一件事的畫面版本：上方哪一顆按鈕要標成「輸入框現在用的這一則」。
+  const [picked, setPicked] = useState<string | null>(null);
+  // 這一批是哪一輪要的（當時最後一則訊息的 id，還沒有訊息時是 "start"），
+  // 以及後端允不允許同一輪「換一批」：2026-09-28 起先鎖起來，後端回 false。
+  const [batchTurn, setBatchTurn] = useState<string | null>(null);
+  const [canRegenerate, setCanRegenerate] = useState(false);
   // 打字動畫的計時器；使用者自己打字、送出或離開聊天室時都要清掉。
   const typer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 「一輪」＝聊天室的最後一則訊息。這一輪已經推薦過就鎖住按鈕，有人傳出新訊息才解鎖。
+  const turn = messages.at(-1)?.id ?? "start";
+  const locked = batchTurn === turn && !canRegenerate;
   useEffect(() => {
     const saved = c.otherLastReadAt;
     if (saved) setReadAt((current) => (current > saved ? current : saved));
@@ -2651,6 +2661,7 @@ function Chat({
   function typeIn(text: string, id: string) {
     stopTyping();
     suggestionId.current = id;
+    setPicked(id);
     setContent("");
     let shown = 0;
     typer.current = setInterval(() => {
@@ -2661,30 +2672,36 @@ function Chat({
   }
   /**
    * 點了輸入框上方的建議按鈕：直接換掉輸入框內容（不跑打字動畫），
-   * 並把來源換成這一則推薦。
+   * 並把來源換成這一則推薦。第 1 則也在上方，所以隨時可以點回來。
    */
   function applySuggestion(suggestion: ReplySuggestion) {
     stopTyping();
     suggestionId.current = suggestion.id;
+    setPicked(suggestion.id);
     setContent(suggestion.text);
   }
   /**
    * 按下輸入框裡的「AI 推薦」：向後端要一批建議。
    *
-   * 成功：第 1 則打字填入輸入框，其餘變成上方的按鈕；按鈕會變成「換一批」，
-   * 再按一次後端會避開同一情境下已經給過的句子。
-   * 失敗：顯示後端回來的中文訊息（例如「AI 忙碌中，請稍後再試。」），輸入框內容不動。
+   * 成功：全部建議（包含第 1 則）變成上方的按鈕，第 1 則同時打字填入輸入框。
+   * 同一輪只能要一次（「換一批」先鎖起來）：按鈕變成「已推薦」並停用，有人傳出新訊息才解鎖；
+   * 重新整理頁面後再按，後端會回傳同一批。
+   * 失敗：顯示後端回來的中文訊息（例如「AI 忙碌中，請稍後再試。」），輸入框內容不動，可以再按。
    */
   async function askAi() {
-    if (suggesting || closed) return;
+    if (suggesting || closed || locked) return;
+    // 記下是哪一輪要的：等待期間對方傳來新訊息的話，這批屬於舊的一輪，按鈕不會被鎖住。
+    const askedTurn = turn;
     setSuggesting(true);
     setError("");
     setNotice("");
     try {
       const result = await requestSuggestions(c.id);
-      const [first, ...rest] = result.suggestions;
-      setSuggestions(rest);
+      setSuggestions(result.suggestions);
       setNotice(result.notice || "");
+      setBatchTurn(askedTurn);
+      setCanRegenerate(result.canRegenerate);
+      const [first] = result.suggestions;
       if (first) typeIn(first.text, first.id);
     } catch (e) {
       setError((e as Error).message);
@@ -2716,6 +2733,7 @@ function Chat({
       // 送出後收起這一批建議：對話已經往前走，舊建議不再適用（要新的就再按一次）。
       stopTyping();
       suggestionId.current = null;
+      setPicked(null);
       setSuggestions([]);
       setNotice("");
       socket?.emit("typing", { conversationId: c.id, isTyping: false });
@@ -2825,10 +2843,12 @@ function Chat({
           <div className="ai-chips" aria-live="polite">
             {suggestions.map((s) => (
               // 點一下就把這一則換進輸入框；title 讓太長被截斷時仍看得到全文。
+              // aria-pressed 標出輸入框現在用的是哪一則（畫面上會框起來）。
               <button
                 key={s.id}
                 type="button"
                 title={s.text}
+                aria-pressed={picked === s.id}
                 onClick={() => applySuggestion(s)}
               >
                 {s.text}
@@ -2873,7 +2893,10 @@ function Chat({
               onChange={(e) => {
                 // 使用者自己打字就中斷打字動畫；清空輸入框等於放棄這則推薦。
                 stopTyping();
-                if (!e.target.value) suggestionId.current = null;
+                if (!e.target.value) {
+                  suggestionId.current = null;
+                  setPicked(null);
+                }
                 setContent(e.target.value);
                 if (Date.now() - lastTyping.current > 1200) {
                   socket?.emit("typing", {
@@ -2889,23 +2912,31 @@ function Chat({
               type="button"
               className={suggesting ? "ai-suggest busy" : "ai-suggest"}
               aria-label="AI 推薦回覆"
-              disabled={suggesting || closed}
+              title={
+                locked ? "這一輪已經推薦過了，有新訊息之後可以再按" : undefined
+              }
+              disabled={suggesting || closed || locked}
               onClick={askAi}
             >
               {suggesting ? (
                 <Loader2 size={15} className="spin" />
-              ) : suggestions.length ? (
+              ) : locked ? (
+                <Check size={15} />
+              ) : batchTurn === turn ? (
                 <RefreshCw size={15} />
               ) : (
                 <Sparkles size={15} />
               )}
-              {/* 手機版只留圖示，這段文字會被 CSS 收起來。 */}
+              {/* 手機版只留圖示，這段文字會被 CSS 收起來。
+                  「換一批」只在後端允許同一輪重來時出現（目前鎖住，顯示「已推薦」）。 */}
               <span>
                 {suggesting
                   ? "產生中"
-                  : suggestions.length
-                    ? "換一批"
-                    : "AI 推薦"}
+                  : locked
+                    ? "已推薦"
+                    : batchTurn === turn
+                      ? "換一批"
+                      : "AI 推薦"}
               </span>
             </button>
           </div>
