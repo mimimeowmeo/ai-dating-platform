@@ -34,12 +34,7 @@ export class AiError extends Error {
 export type AiOrigin = "human" | "ai_verbatim" | "ai_edited";
 /** 推薦的用途；也用來判斷 AI 訊息有沒有「開啟新話題」。 */
 export type AiIntent =
-  | "answer"
-  | "question"
-  | "callback"
-  | "humor"
-  | "plan"
-  | "share";
+  "answer" | "question" | "callback" | "humor" | "plan" | "share" | "reask";
 
 /** 使用者檔案快照：標籤傳中文顯示名稱（例如「登山」），不是資料庫代碼。 */
 export type AiProfile = {
@@ -101,12 +96,16 @@ export type AiStyleStats = {
   particles?: Record<string, number>;
 };
 
-/** 風格卡上的一條抽象特徵句。 */
+/**
+ * 風格卡上的一條抽象特徵句。
+ * lastSeenAt 是這條特徵最後一次出現的時間（ISO 字串）；開場、追問、重啟找話題時越近越優先。
+ */
 export type AiStyleFacet = {
   kind: "topic" | "tone" | "habit" | "avoid";
   statement: string;
   weight: number;
   evidence: number;
+  lastSeenAt?: string | null;
 };
 
 /** 一位使用者的風格卡；由 build-style 背景工作產生後存進 user_style_profiles。 */
@@ -195,6 +194,7 @@ const styleFacet = z.object({
   statement: z.string(),
   weight: z.number(),
   evidence: z.number().int(),
+  lastSeenAt: z.string().nullish(),
 });
 const styleCard = z.object({
   featureVersion: z.string(),
@@ -231,6 +231,7 @@ const suggestResponse = z.object({
         "humor",
         "plan",
         "share",
+        "reask",
       ]),
       styleTarget: z.enum(["partner", "blend"]),
       styleDistance: z.number(),

@@ -1,4 +1,4 @@
-// AI 推薦回覆會用到的純函式：文字相似度、訊息來源判定、pgvector 字面值。
+// AI 推薦回覆會用到的純函式：文字相似度、訊息來源判定、pgvector 字面值、風格卡要不要更新。
 // 這個檔案刻意不匯入 Prisma、Redis 或設定，方便單獨做單元測試（test/ai-text.test.mjs）。
 
 /** 向量維度；必須與 AI 服務的 AI_EMBEDDING_DIMENSIONS 和資料表的 vector(768) 一致。 */
@@ -8,6 +8,29 @@ export const EMBEDDING_DIMENSIONS = 768;
 export const VERBATIM_SIMILARITY = 0.95;
 /** 相似度 ≥ 0.5：算改寫過的 AI 訊息；低於 0.5 視為使用者自己重寫，算 human。 */
 export const EDITED_SIMILARITY = 0.5;
+
+/** 風格卡建立超過這麼久才考慮更新（2026-09-27：每天最多更新一次）。 */
+export const STYLE_REFRESH_AFTER_MS = 24 * 60 * 60 * 1000;
+/** 風格卡涵蓋的最後一則訊息之後，又多了這麼多則真人訊息才值得重新萃取。 */
+export const STYLE_REFRESH_MESSAGES = 20;
+
+/**
+ * 按推薦時，這張風格卡要不要在背景重新萃取（2026-09-27 使用者決定：每天最多更新一次）。
+ *
+ * 開場、追問、重啟依「B 最近在聊的話題」找話題，卡片太舊就抓不到最近的話題；
+ * 原本要新增 200 則真人訊息才會重建，聊得少的人可能一直用舊的話題。
+ * 所以卡片建立超過 24 小時、而且之後又多了 20 則以上真人訊息，就重新萃取。
+ */
+export function styleCardIsStale(
+  createdAt: Date,
+  newMessages: number,
+  now: Date,
+) {
+  return (
+    now.getTime() - createdAt.getTime() >= STYLE_REFRESH_AFTER_MS &&
+    newMessages >= STYLE_REFRESH_MESSAGES
+  );
+}
 
 /** 訊息來源：真人打的／AI 推薦原封不動送出／AI 推薦改過再送。 */
 export type Origin = "human" | "ai_verbatim" | "ai_edited";

@@ -7,6 +7,8 @@
 1. 只留真人訊息（AI 來源的訊息再排除一次當保險）。
 2. 依真人訊息數決定信心與寫法來源（≥30 聊天為主／1～29 聊天與 bio 各半／0 只用 bio／都沒有）。
 3. 寫法數值用程式統計；語氣、話題、習慣交給模型，分批萃取（map）後在程式裡合併（reduce）。
+   每一批最多涵蓋 7 天的訊息，合併時記下每條特徵最後出現在哪一批（lastSeenAt），
+   讓產生推薦時可以「越近越優先」挑話題（2026-09-27）。
 4. 抽象化檢查：特徵句不得與任何原始訊息共用連續 8 個字，也不得含數字、網址、帳號。
 5. 需要時把特徵句向量化，讓後端存進 pgvector 供檢索。
 
@@ -16,6 +18,7 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic_ai import Agent
@@ -67,6 +70,9 @@ from .textutil import (
 )
 
 MAP_BATCH_TOKENS = 6000  # 每批送給萃取模型的訊息量（估計 tokens）；平均 7.1 字的訊息約 500 則
+# 每批最多涵蓋多久的訊息（2026-09-27）。特徵句的新舊（lastSeenAt）只能精確到「批」，
+# 所以不讓一批橫跨太久：7 天內的話題算同一段時間，一週以上的新舊才分得出來。
+MAP_BATCH_SPAN = timedelta(days=7)
 AI_TOPIC_WEIGHT = 0.3  # [AI話題] 裡的話題喜好降權（規格 5.3）
 BIO_WEIGHT = {"chat": 0.2, "mixed": 0.5, "bio": 1.0}  # bio 在合併時的權重，依寫法來源而定
 NGRAM_SIZE = 8  # 特徵句不得與原始訊息共用連續 8 個字以上
@@ -80,11 +86,12 @@ STATEMENT_CHARS = 40
 
 @dataclass
 class _Tally:
-    """合併（reduce）時用來累計某一條描述的分數與出現次數。"""
+    """合併（reduce）時用來累計某一條描述的分數、出現次數，以及最後出現在哪個時間的批次。"""
 
     text: str
     score: float = 0.0
     evidence: int = 0
+    last_seen: datetime | None = None
 
 
 @dataclass
@@ -97,20 +104,41 @@ class _Merged:
     habits: list[_Tally] = field(default_factory=list)
 
 
-def split_batches(lines: list[str], max_tokens: int = MAP_BATCH_TOKENS) -> list[list[str]]:
-    """把訊息行依估計 token 數切成多批，每批不超過 max_tokens（單則超長時自成一批）。"""
-    batches: list[list[str]] = []
+@dataclass
+class _Batch:
+    """送給萃取模型的一批訊息；last_at 是這批最後一則訊息的時間（自我介紹那批是 None）。"""
+
+    lines: list[str]
+    last_at: datetime | None = None
+
+
+def split_batches(
+    items: list[tuple[str, datetime]],
+    max_tokens: int = MAP_BATCH_TOKENS,
+    max_span: timedelta = MAP_BATCH_SPAN,
+) -> list[_Batch]:
+    """把依時間排好的訊息行切成多批。
+
+    每批不超過 max_tokens（單則超長時自成一批），而且第一則到最後一則不超過 max_span；
+    兩個條件任一超過就開新的一批。items 是（訊息行、發送時間），需已由舊到新排序。
+    """
+    batches: list[_Batch] = []
     current: list[str] = []
+    started: datetime | None = None
+    last: datetime | None = None
     used = 0
-    for line in lines:
+    for line, sent_at in items:
         cost = estimate_tokens(line) + 2
-        if current and used + cost > max_tokens:
-            batches.append(current)
+        if current and (used + cost > max_tokens or sent_at - started >= max_span):
+            batches.append(_Batch(lines=current, last_at=last))
             current, used = [], 0
+        if not current:
+            started = sent_at
         current.append(line)
+        last = sent_at
         used += cost
     if current:
-        batches.append(current)
+        batches.append(_Batch(lines=current, last_at=last))
     return batches
 
 
@@ -119,35 +147,50 @@ def recency_weights(count: int) -> list[float]:
     return [0.5 + 0.5 * (index + 1) / count for index in range(count)]
 
 
-def _add_similar(tallies: list[_Tally], text: str, score: float) -> None:
-    """把一條描述加進累計清單；與既有描述相似度 ≥ 0.6 就合併成同一條（分數與次數累加）。"""
+def _latest(first: datetime | None, second: datetime | None) -> datetime | None:
+    """兩個時間取較新的一個；None 代表沒有時間（例如自我介紹那一批），不影響結果。"""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return max(first, second)
+
+
+def _add_similar(tallies: list[_Tally], text: str, score: float, seen_at: datetime | None = None) -> None:
+    """把一條描述加進累計清單；與既有描述相似度 ≥ 0.6 就合併成同一條（分數與次數累加）。
+
+    seen_at 是這條描述所在批次的最後一則訊息時間；合併時保留較新的那個，當作這條特徵的 lastSeenAt。
+    """
     for tally in tallies:
         if text_similarity(tally.text, text) >= MERGE_SIMILARITY:
             tally.score += score
             tally.evidence += 1
+            tally.last_seen = _latest(tally.last_seen, seen_at)
             return
-    tallies.append(_Tally(text=text, score=score, evidence=1))
+    tallies.append(_Tally(text=text, score=score, evidence=1, last_seen=seen_at))
 
 
-def merge_map_results(results: list[tuple[StyleMapResult, float]]) -> _Merged:
+def merge_map_results(results: list[tuple[StyleMapResult, float, datetime | None]]) -> _Merged:
     """把每一批的萃取結果合併（reduce 步驟），全部在程式裡完成、不再呼叫模型。
 
+    results 的每一項是（這批的萃取結果、批次權重、這批最後一則訊息的時間）。
     - 語氣與習慣：相似的描述合併，分數 = 各批權重相加。
     - 話題：相似的話題名稱合併（例如「登山」與「登山山景」），分數 = 熱度/5 × 批次權重；
       來自 [AI話題] 的再乘 0.3（降權）。
     - 會避開的話題：相似的合併，出現幾次、權重多少就累加多少。
+    每一條都記下最後出現在哪一批（取那批最後一則訊息的時間），給「越近越優先」使用。
     """
     merged = _Merged()
-    for result, weight in results:
+    for result, weight, seen_at in results:
         for note in result.voiceNotes:
-            _add_similar(merged.voice, single_line(note), weight)
+            _add_similar(merged.voice, single_line(note), weight, seen_at)
         for habit in result.habits:
-            _add_similar(merged.habits, single_line(habit), weight)
+            _add_similar(merged.habits, single_line(habit), weight, seen_at)
         for item in result.topics:
             score = (item.heat / 5) * weight * (AI_TOPIC_WEIGHT if item.fromAiTopic else 1.0)
-            _add_similar(merged.topics, single_line(item.topic), score)
+            _add_similar(merged.topics, single_line(item.topic), score, seen_at)
         for topic in result.avoidTopics:
-            _add_similar(merged.avoid, single_line(topic), weight)
+            _add_similar(merged.avoid, single_line(topic), weight, seen_at)
     for tallies in (merged.voice, merged.topics, merged.avoid, merged.habits):
         tallies.sort(key=lambda tally: (-tally.score, -tally.evidence, tally.text))
     return merged
@@ -162,7 +205,8 @@ def build_facets(merged: _Merged, ngram_index: set[str]) -> tuple[list[str], lis
     """把合併結果轉成語氣描述與特徵句，並做抽象化檢查。
 
     回傳（語氣描述清單、特徵句清單、被抽象化檢查刪掉的數量）。
-    特徵句的 weight 以同類中最高分為 1 做正規化；文字一律轉台灣繁體並限制 40 字。
+    特徵句的 weight 以同類中最高分為 1 做正規化；文字一律轉台灣繁體並限制 40 字；
+    lastSeenAt 是這條特徵最後出現的批次時間。
     """
     rejected = 0
     voice_notes: list[str] = []
@@ -189,7 +233,13 @@ def build_facets(merged: _Merged, ngram_index: set[str]) -> tuple[list[str], lis
             if kind == "tone":
                 voice_notes.append(statement)
             facets.append(
-                StyleFacet(kind=kind, statement=statement, weight=round(min(1.0, tally.score / top_score), 3), evidence=tally.evidence)
+                StyleFacet(
+                    kind=kind,
+                    statement=statement,
+                    weight=round(min(1.0, tally.score / top_score), 3),
+                    evidence=tally.evidence,
+                    lastSeenAt=tally.last_seen,
+                )
             )
 
     add_group(merged.voice, "tone", MAX_VOICE_NOTES, "{}")
@@ -295,16 +345,19 @@ class StyleProfileBuilder:
         if confidence == "none":
             return StyleProfileResponse(card=card)
 
-        lines = [f"[AI話題] {single_line(m.content)}" if m.inAiTopic else single_line(m.content) for m in human]
-        batches = split_batches(lines) if lines else []
+        items = [
+            (f"[AI話題] {single_line(m.content)}" if m.inAiTopic else single_line(m.content), as_utc(m.createdAt))
+            for m in human
+        ]
+        batches = split_batches(items) if items else []
         weighted = list(zip(batches, recency_weights(len(batches)))) if batches else []
         if visible_chars(bio) >= MIN_BIO_CHARS:
-            weighted.append(([f"[自我介紹] {single_line(bio)}"], BIO_WEIGHT[source]))
-        results: list[tuple[StyleMapResult, float]] = []
+            weighted.append((_Batch(lines=[f"[自我介紹] {single_line(bio)}"]), BIO_WEIGHT[source]))
+        results: list[tuple[StyleMapResult, float, datetime | None]] = []
         model_name = None
-        for batch_lines, weight in weighted:
-            result = await self._map(batch_lines)
-            results.append((result.output, weight))
+        for batch, weight in weighted:
+            result = await self._map(batch.lines)
+            results.append((result.output, weight, batch.last_at))
             model_name = model_name_of(result) or model_name
         voice_notes, facets, rejected = build_facets(
             merge_map_results(results), build_ngram_index([m.content for m in human], NGRAM_SIZE)

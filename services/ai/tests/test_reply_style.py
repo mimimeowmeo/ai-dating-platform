@@ -7,6 +7,7 @@ from app.reply.style import (
     classify_message_type,
     cold_start_card,
     compute_style_stats,
+    has_chat_history,
     partner_reactions,
     resolve_target,
     style_distance,
@@ -64,12 +65,14 @@ class StyleStatsTests(unittest.TestCase):
         self.assertEqual(mixed.emojiPerMessage, 0.18)
         self.assertEqual(mixed.particles, {"欸": 0.4, "啦": 0.12})
 
-    def test_style_distance_prefers_closer_length_and_habits(self):
+    def test_style_distance_ignores_length_and_checks_habits(self):
         target = stats(medianChars=5, particles={"啦": 0.5}, emojiPerMessage=1.0)
-        close = style_distance("好啊啦😂", target)
-        far = style_distance("我覺得這個週末如果天氣不錯的話我們可以考慮一起去郊外走走看看", target)
-        self.assertLess(close, far)
-        self.assertGreaterEqual(close, 0.0)
+        short = style_distance("好啦👍", target)
+        long = style_distance("那我們這個週末一起去看那個展覽好啦👍", target)
+        # 字數不列入（2026-09-27）：寫法一樣時，長句和短句一樣近，短句也不會因為太短被扣分。
+        self.assertEqual((short, long), (0.0, 0.0))
+        # 沒有 emoji、也沒用常用的語助詞：emoji 差 1/3、語助詞扣一半 → 0.3 × 1/3 + 0.4 × 0.5。
+        self.assertEqual(style_distance("我覺得可以", target), 0.3)
 
     def test_cold_start_card_uses_bio_only_for_wording(self):
         card = cold_start_card(profile("小美", bio="喜歡爬山跟拍照啦，週末常常往山上跑喔"), SITE_DEFAULT_STATS)
@@ -79,29 +82,39 @@ class StyleStatsTests(unittest.TestCase):
         empty = cold_start_card(profile("小美", bio="嗨"), SITE_DEFAULT_STATS)
         self.assertEqual((empty.confidence, empty.sampleSource), ("none", "none"))
 
-    def test_resolve_target_uses_partner_only_for_the_chat_first_message(self):
+    def test_resolve_target_follows_mode(self):
         requester = cold_start_card(profile("阿明", bio="平常喜歡打羽球跟煮飯，也愛看電影"), SITE_DEFAULT_STATS)
         requester = requester.model_copy(update={"stats": stats(medianChars=8)})
         partner = requester.model_copy(update={"stats": stats(medianChars=15)})
-        # 聊天室還沒有任何訊息：整批照 B（B 100%）。
-        first = resolve_target(requester, partner, BlendConfig(), first_message=True)
-        self.assertEqual((first.rule, first.source, first.stats.medianChars), ("first_message", "partner", 15))
-        # 有人傳過訊息之後：A 80%／B 20%（0.8 × 8 + 0.2 × 15）。
-        later = resolve_target(requester, partner, BlendConfig(), first_message=False)
-        self.assertEqual((later.rule, later.source, later.stats.medianChars), ("later", "blend", 9.4))
-        # B 沒有足夠資料：不論哪一種都只用 A 的寫法。
+        # 2026-09-27：開場、重啟 B 100%；回覆 A 80%／B 20%（0.8 × 8 + 0.2 × 15）；追問只用 A 的語氣。
+        expected = {
+            "opener": ("partner", 15),
+            "revive": ("partner", 15),
+            "reply": ("blend", 9.4),
+            "follow_up": ("requester", 8),
+        }
+        for mode, (source, median_chars) in expected.items():
+            target = resolve_target(requester, partner, BlendConfig(), mode)
+            self.assertEqual((target.rule, target.source, target.stats.medianChars), (mode, source, median_chars))
+        # B 沒有足夠資料：不論哪一種模式都只用 A 的寫法。
         unknown = usable_card(None, profile("小美", bio="嗨"), SITE_DEFAULT_STATS)
-        for first_message in (True, False):
-            fallback = resolve_target(requester, unknown, BlendConfig(), first_message=first_message)
+        for mode in expected:
+            fallback = resolve_target(requester, unknown, BlendConfig(), mode)
             self.assertEqual((fallback.source, fallback.stats.medianChars), ("requester", 8))
 
     def test_resolve_target_labels_source_by_weight(self):
         requester = cold_start_card(profile("阿明", bio="平常喜歡打羽球跟煮飯，也愛看電影"), SITE_DEFAULT_STATS)
         requester = requester.model_copy(update={"stats": stats(medianChars=8)})
         partner = requester.model_copy(update={"stats": stats(medianChars=15)})
-        blend = BlendConfig(firstMessagePartnerWeight=0.5, laterPartnerWeight=0.0)
-        self.assertEqual(resolve_target(requester, partner, blend, first_message=True).source, "blend")
-        self.assertEqual(resolve_target(requester, partner, blend, first_message=False).source, "requester")
+        blend = BlendConfig(openerPartnerWeight=0.5, replyPartnerWeight=0.0)
+        self.assertEqual(resolve_target(requester, partner, blend, "opener").source, "blend")
+        self.assertEqual(resolve_target(requester, partner, blend, "reply").source, "requester")
+
+    def test_chat_history_needs_thirty_human_messages(self):
+        card = cold_start_card(profile("小美", bio="喜歡爬山跟拍照，週末常往山上跑喔"), SITE_DEFAULT_STATS)
+        self.assertFalse(has_chat_history(card))  # 只有 bio
+        self.assertFalse(has_chat_history(card.model_copy(update={"messageCount": 29})))
+        self.assertTrue(has_chat_history(card.model_copy(update={"messageCount": 30})))
 
 
 class ReactionTests(unittest.TestCase):

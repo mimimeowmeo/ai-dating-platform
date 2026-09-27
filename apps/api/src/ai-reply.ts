@@ -132,16 +132,22 @@ export class ReplySuggestions {
         lastMessage?.id ?? null,
       ),
     };
-    // 沒有風格卡就順手排一次背景萃取（規格 8：需要時發現沒有）；1 小時內只會排一次。
+    // 沒有風格卡就順手排一次背景萃取（規格 8：需要時發現沒有）；卡片太舊也重新萃取
+    // （超過 24 小時、而且又多了 20 則真人訊息，每天最多一次）。同一人 1 小時內只會排一次。
     // 延後幾分鐘才開始：使用者接下來常會按「換一批」，立刻萃取會跟推薦搶同一個 Ollama。
-    for (const [card, id] of [
+    for (const [style, id] of [
       [requesterStyle, userId],
       [partnerStyle, conversation.otherUserId],
     ] as const)
-      if (!card)
-        void this.jobs
-          .enqueueStyle(id, STYLE_AFTER_SUGGEST_DELAY_MS)
-          .catch(() => undefined);
+      void (
+        style
+          ? this.jobs.enqueueStyleIfStale(
+              id,
+              style.createdAt,
+              style.card.windowTo ? new Date(style.card.windowTo) : null,
+            )
+          : this.jobs.enqueueStyle(id, STYLE_AFTER_SUGGEST_DELAY_MS)
+      ).catch(() => undefined);
 
     let result;
     try {

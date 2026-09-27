@@ -15,12 +15,14 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # 風格卡的特徵版本；計算方式或欄位意義改變時要升版（AI-SPEC：模型與特徵都要記版本）。
-FEATURE_VERSION = "style-card-v1"
+# style-card-v2（2026-09-27）：特徵句多了 lastSeenAt；萃取的批次改成最多涵蓋 7 天，讓特徵句分得出新舊。
+FEATURE_VERSION = "style-card-v2"
 
 # 訊息來源：真人打的／AI 推薦原封不動送出／AI 推薦改過再送（由後端依相似度判斷）。
 Origin = Literal["human", "ai_verbatim", "ai_edited"]
-# 一則推薦的用途：回答、提問、呼應舊話題、幽默、邀約推進、分享自己。
-Intent = Literal["answer", "question", "callback", "humor", "plan", "share"]
+# 一則推薦的用途：回答、提問、呼應舊話題、幽默、邀約推進、分享自己，
+# 以及 reask：追問模式裡「換個說法再問一次 A 上一則還沒得到回答的問題」（2026-09-27）。
+Intent = Literal["answer", "question", "callback", "humor", "plan", "share", "reask"]
 # 產生推薦的模式，判斷規則見 suggest.detect_mode。
 Mode = Literal["opener", "reply", "follow_up", "revive"]
 # 聊天室裡的角色：A 是按按鈕的人，B 是聊天對象。
@@ -148,12 +150,15 @@ class StyleFacet(ApiModel):
 
     kind：topic（喜歡的話題）／tone（語氣）／habit（聊天習慣）／avoid（會避開的話題）。
     weight 是 0～1 的重要度；evidence 是有幾批訊息支持這條特徵。
+    lastSeenAt 是這條特徵最後一次出現的時間：取支持它的那幾批訊息裡、最新一批的最後一則訊息時間。
+    開場、追問、重啟找話題時依它「越近越優先」（2026-09-27）；只來自自我介紹、或舊版風格卡沒有這個欄位時是 None。
     """
 
     kind: Literal["topic", "tone", "habit", "avoid"]
     statement: ShortText
     weight: Ratio = 0.5
     evidence: Annotated[int, Field(ge=0)] = 0
+    lastSeenAt: datetime | None = None
 
 
 class StyleCard(ApiModel):
@@ -190,14 +195,17 @@ class RetrievedChunk(ApiModel):
 class BlendConfig(ApiModel):
     """風格混合比例：B 的權重（0＝完全照 A 的寫法，1＝完全照 B 喜歡的樣子）。規格 4.1、4.2。
 
-    一批 5 則推薦共用同一個比例，而且只看「整個聊天室」有沒有訊息，跟是誰傳的無關：
-    - firstMessagePartnerWeight：聊天室還沒有任何訊息、要寫整個聊天室的第一則訊息時用，
-      預設 1.0（B 100%）。
-    - laterPartnerWeight：只要有人傳過訊息（A 或 B 都算），之後一律用這個，預設 0.2（A 80%／B 20%）。
+    一批 5 則推薦共用同一個比例，依模式決定（2026-09-27 使用者決定）：
+    - openerPartnerWeight：開場（聊天室還沒有任何訊息），預設 1.0（B 100%）。
+    - replyPartnerWeight：回覆（最後一則是 B 傳的），預設 0.2（A 80%／B 20%）。
+    - followUpPartnerWeight：追問（最後一則是 A 傳的），預設 0.0（完全用 A 自己的語氣）。
+    - revivePartnerWeight：重啟（超過 12 小時沒人說話，改用開場的做法），預設 1.0（B 100%）。
     """
 
-    firstMessagePartnerWeight: Ratio = 1.0
-    laterPartnerWeight: Ratio = 0.2
+    openerPartnerWeight: Ratio = 1.0
+    replyPartnerWeight: Ratio = 0.2
+    followUpPartnerWeight: Ratio = 0.0
+    revivePartnerWeight: Ratio = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -239,8 +247,8 @@ class Suggestion(ApiModel):
     """一則推薦。rank 1 會被前端以打字動畫填入輸入框，其餘變成按鈕。
 
     styleTarget 是這一批共用的寫法規則（同一批 5 則都一樣）：
-    - partner：要寫整個聊天室的第一則訊息，照 B 喜歡的樣子寫（B 100%）。
-    - blend：其他情況，也就是 A 80%／B 20%；B 沒有足夠資料時只用 A 的寫法，也標成 blend。
+    - partner：照 B 喜歡的樣子寫（B 100%，開場與重啟）。
+    - blend：其他情況：回覆的 A 80%／B 20%、追問只用 A 的語氣，以及 B 沒有足夠資料只用 A 的寫法，都標成 blend。
     """
 
     rank: Annotated[int, Field(ge=1, le=5)]
@@ -269,13 +277,13 @@ class UsageInfo(ApiModel):
 class StyleTarget(ApiModel):
     """這一批 5 則共用的風格目標（由 style.resolve_target 算出）。
 
-    - rule：套用了哪一條規則。first_message＝聊天室還沒有任何訊息；later＝已經有人傳過訊息。
+    - rule：依哪個模式決定比例（開場、回覆、追問、重啟各有自己的比例，見 BlendConfig）。
     - source：目標實際用了誰的寫法。partner＝B 喜歡的樣子；blend＝A 為主、帶一點 B；
-      requester＝B 沒有足夠資料（沒聊過天、bio 也太短），只用 A 的寫法（規格 5.3）。
-    - stats：數值目標本身（字數、emoji、語助詞…），排序時用來算每則候選的風格距離。
+      requester＝只用 A 的寫法（追問模式，或 B 沒有足夠資料：沒聊過天、bio 也太短，規格 5.3）。
+    - stats：數值目標本身（emoji、語助詞、笑聲詞…），排序時用來算每則候選的風格距離。
     """
 
-    rule: Literal["first_message", "later"]
+    rule: Mode
     source: Literal["partner", "blend", "requester"]
     stats: StyleStats
 
@@ -461,7 +469,7 @@ class StyleProfileResponse(ApiModel):
 class DraftSuggestion(LlmModel):
     """模型產生的一則候選。
 
-    寫法規則（B 100% 或 A 80%／B 20%）由程式依聊天室有沒有訊息決定，模型不用標示；
+    寫法規則（B 100%、A 80%／B 20% 或只用 A）由程式依模式決定，模型不用標示；
     模型如果照舊版格式多吐 styleTarget，LlmModel 會直接忽略。
     """
 

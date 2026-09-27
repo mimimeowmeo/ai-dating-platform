@@ -36,6 +36,7 @@ type ProfileRow = {
   bio_sample: string;
   model_name: string | null;
   prompt_version: string | null;
+  created_at: Date;
 };
 
 @Injectable()
@@ -110,13 +111,17 @@ export class VectorStore {
   /**
    * 讀出使用者最新版的風格卡（不含向量），組成 AI 服務要的 StyleCard 格式。
    *
-   * facets 依權重取前 N 條當「基本盤」；跟話題相關的部分由 searchFacets 另外補。
+   * facets 全部帶上（一張卡最多 36 條，AI 服務的上限是 40），順序是越近越優先：
+   * 依最後出現時間由新到舊，一樣新再依權重（2026-09-27）。回覆模式由 AI 服務自己依權重挑，
+   * 跟話題相關的部分由 searchFacets 另外補；開場、追問、重啟則直接依這個順序找話題。
    * 沒有風格卡時回傳 null，AI 服務會改用 bio 做冷啟動（規格 5.3）。
+   * createdAt 是這張卡建立的時間，用來判斷要不要重新萃取（見 AiJobs.enqueueStyleIfStale）。
    */
-  async styleCard(userId: string, facetLimit = 12) {
+  async styleCard(userId: string, facetLimit = 40) {
     const [profile] = await this.db.$queryRaw<ProfileRow[]>`
       SELECT version, feature_version, confidence, sample_source, message_count,
-             window_from, window_to, stats, voice_notes, bio_sample, model_name, prompt_version
+             window_from, window_to, stats, voice_notes, bio_sample, model_name, prompt_version,
+             created_at
       FROM user_style_profiles
       WHERE user_id = ${userId}::uuid
       ORDER BY version DESC
@@ -124,12 +129,18 @@ export class VectorStore {
     `;
     if (!profile) return null;
     const facets = await this.db.$queryRaw<
-      { kind: AiStyleFacet["kind"]; statement: string; weight: number; evidence: number }[]
+      {
+        kind: AiStyleFacet["kind"];
+        statement: string;
+        weight: number;
+        evidence: number;
+        last_seen_at: Date | null;
+      }[]
     >`
-      SELECT kind, statement, weight, evidence
+      SELECT kind, statement, weight, evidence, last_seen_at
       FROM user_style_facets
       WHERE user_id = ${userId}::uuid AND profile_version = ${profile.version}
-      ORDER BY weight DESC, statement ASC
+      ORDER BY last_seen_at DESC NULLS LAST, weight DESC, statement ASC
       LIMIT ${facetLimit}
     `;
     const card: AiStyleCard = {
@@ -144,6 +155,11 @@ export class VectorStore {
         statement: facet.statement,
         weight: Number(facet.weight),
         evidence: Number(facet.evidence),
+        // 沒有時間（舊版卡片、只來自自我介紹）就不送這個欄位：AI 服務拒絕不認得的欄位，
+        // 這樣後端先更新、AI 服務還是舊版時，舊的風格卡照樣能用。
+        ...(facet.last_seen_at
+          ? { lastSeenAt: facet.last_seen_at.toISOString() }
+          : {}),
       })),
       bioSample: profile.bio_sample,
       messageCount: profile.message_count,
@@ -152,7 +168,7 @@ export class VectorStore {
       modelName: profile.model_name,
       promptVersion: profile.prompt_version,
     };
-    return { version: profile.version, card };
+    return { version: profile.version, card, createdAt: profile.created_at };
   }
 
   /**
@@ -242,10 +258,11 @@ export class VectorStore {
           : Prisma.sql`NULL`;
         await tx.$executeRaw`
           INSERT INTO user_style_facets (
-            id, user_id, profile_version, kind, statement, weight, evidence, embedding
+            id, user_id, profile_version, kind, statement, weight, evidence, last_seen_at, embedding
           ) VALUES (
             gen_random_uuid(), ${userId}::uuid, ${version}, ${facet.kind},
-            ${facet.statement}, ${facet.weight}, ${facet.evidence}, ${embedding}
+            ${facet.statement}, ${facet.weight}, ${facet.evidence},
+            ${facet.lastSeenAt ? new Date(facet.lastSeenAt) : null}, ${embedding}
           )
         `;
       }

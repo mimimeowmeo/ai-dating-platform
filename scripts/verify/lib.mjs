@@ -1,7 +1,8 @@
 // 驗收腳本共用的小工具：呼叫 API、查資料庫、印出檢查結果。
 // 預設打本機 docker 的 :8080 與 heartlink-pg 的 dating 資料庫，可用環境變數覆蓋：
 //   VERIFY_API_BASE（預設 http://localhost:8080/api/v1）
-//   VERIFY_ORIGIN  （預設 http://localhost:8080，要與後端 WEB_ORIGIN 相同）
+//   VERIFY_ORIGIN  （預設 http://localhost:8080，要與後端 WEB_ORIGIN 相同；
+//                    run-all.mjs 的 Playwright 沒設 E2E_BASE_URL 時也用它）
 //   VERIFY_PG_*    （容器名／使用者／資料庫，預設 heartlink-pg / heartlink / dating）
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -9,7 +10,7 @@ import { randomUUID } from "node:crypto";
 export const API =
   process.env.VERIFY_API_BASE || "http://localhost:8080/api/v1";
 export const ORIGIN = process.env.VERIFY_ORIGIN || "http://localhost:8080";
-const PG_CONTAINER = process.env.VERIFY_PG_CONTAINER || "heartlink-pg";
+export const PG_CONTAINER = process.env.VERIFY_PG_CONTAINER || "heartlink-pg";
 const PG_USER = process.env.VERIFY_PG_USER || "heartlink";
 const PG_PASSWORD = process.env.VERIFY_PG_PASSWORD || "heartlink";
 const PG_DATABASE = process.env.VERIFY_PG_DATABASE || "dating";
