@@ -1205,7 +1205,7 @@ input[type="range"] {
   min-width: 0;
   container-type: inline-size;
 }
-/* 測試用搜尋列（網址帶 ?muggle=false 才出現）。 */
+/* 測試用搜尋列（網址帶 ?debug=search 才出現）。 */
 .user-search {
   display: grid;
   gap: 16px;
@@ -1242,6 +1242,7 @@ input[type="range"] {
   font-size: 12px;
 }
 .person-card {
+  position: relative;
   display: grid;
   gap: 24px;
   padding: 24px;
@@ -1288,6 +1289,203 @@ input[type="range"] {
   line-height: 1.65;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* 測試用推薦資訊（探索頁網址帶 ?debug=explain 才出現）：右上角標示、共同標籤標亮、推薦依據。 */
+/* 單欄（手機、並排比較）時自成一列靠右，不壓在照片上；左右兩欄時浮在右上角的文字區。 */
+.rec-badge {
+  justify-self: end;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: 13px;
+  box-shadow: 0 2px 8px var(--shadow-pop);
+}
+.rec-badge.exploration {
+  background: var(--accent);
+}
+.rec-badge.latest {
+  background: var(--muted);
+}
+@container (min-width: 560px) {
+  .person-card:not(.comparing) > .rec-badge {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+  }
+}
+/* 並排比較：卡片改成單欄。上面兩張照片左右並排（框出最像的部位）、開關與說明，
+   下面兩人完整的卡片內容（夠寬時左右兩欄），最後是按鈕與推薦依據。 */
+.person-card.comparing {
+  grid-template-columns: minmax(0, 1fr);
+}
+.compare {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.compare-photos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.compare-photo {
+  position: relative;
+}
+.face-boxes {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.compare-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.face-switch {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.face-switch input {
+  position: relative;
+  flex-shrink: 0;
+  width: 38px;
+  height: 22px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--line);
+  cursor: pointer;
+  transition: background-color 0.2s;
+  appearance: none;
+}
+.face-switch input::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  content: "";
+  transition: transform 0.2s;
+}
+.face-switch input:checked {
+  background: var(--primary);
+}
+.face-switch input:checked::after {
+  transform: translateX(16px);
+}
+.face-switch input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.face-legend {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px dashed var(--dashed);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.face-legend ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
+.face-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+.face-legend li i {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+}
+.face-rest {
+  color: var(--muted);
+}
+.compare-details {
+  display: grid;
+  gap: 28px;
+}
+.compare-details .person-info h2 {
+  font-size: 24px;
+}
+@container (min-width: 560px) {
+  .compare-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.compare-photos figure {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  margin: 0;
+}
+.compare-photos figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.compare-close {
+  padding: 6px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.link-button {
+  color: var(--primary);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.tags.hash > span.tag-match {
+  outline: 2px solid var(--primary);
+  font-weight: 700;
+}
+.rec-why {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px dashed var(--dashed);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.rec-why ul {
+  display: grid;
+  gap: 6px;
+  padding-left: 18px;
+  list-style: disc;
+}
+.rec-anchor img {
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  margin: 0 4px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
 }
 .discovery-actions {
   display: grid;

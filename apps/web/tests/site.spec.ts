@@ -679,7 +679,7 @@ test("探索偏好：點軌道會把最近的那顆把手移過去，按住可�
   }
 });
 // 只用兩個帳號：CI 的 e2e 共用註冊限流（20 次／5 分鐘），整套已經用掉 18 次。
-test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜尋自己以外的全部使用者，任何狀態都能重新按喜歡／略過", async ({
+test("探索心動：網址帶 ?debug=search 改顯示測試用搜尋列，搜尋自己以外的全部使用者，任何狀態都能重新按喜歡／略過", async ({
   browser,
 }, info) => {
   test.skip(
@@ -747,11 +747,12 @@ test("探索心動：網址帶 ?muggle=false 改顯示測試用搜尋列，搜�
     await a.goto("/discover");
     await expect(a.locator(".discover-main .person-card")).toBeVisible();
     await expect(box).toBeHidden();
-    await a.goto("/discover?muggle=true");
+    // debug 的其他值（例如 explain）不會出現搜尋列。
+    await a.goto("/discover?debug=explain");
     await expect(a.locator(".discover-main .person-card")).toBeVisible();
     await expect(box).toBeHidden();
     // 測試模式：出現搜尋列，原本的探索卡片先隱藏。
-    await a.goto("/discover?muggle=false");
+    await a.goto("/discover?debug=search");
     await expect(box).toBeVisible();
     await expect(a.locator(".discover-main .person-card")).toHaveCount(0);
     // 搜尋共同的亂數：只找到乙，自己（甲）不會出現。

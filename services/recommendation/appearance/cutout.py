@@ -15,12 +15,17 @@ MASK_FILL = (123, 117, 104)
 FALLBACK_CROP_SCALE = 1.3
 
 
-def square_crop(image: np.ndarray, box, scale: float) -> np.ndarray:
-    """以 box 中心裁出邊長 max(w, h) × scale 的正方形，超出畫面的部分補 0。"""
+def crop_origin(box, scale: float) -> tuple[int, int]:
+    """square_crop 裁出的正方形左上角在原圖的座標；超出畫面時可能是負的。"""
     x, y, w, h = box
     side = int(round(max(w, h) * scale))
-    x0 = int(round(x + w / 2 - side / 2))
-    y0 = int(round(y + h / 2 - side / 2))
+    return int(round(x + w / 2 - side / 2)), int(round(y + h / 2 - side / 2))
+
+
+def square_crop(image: np.ndarray, box, scale: float) -> np.ndarray:
+    """以 box 中心裁出邊長 max(w, h) × scale 的正方形，超出畫面的部分補 0。"""
+    side = int(round(max(box[2], box[3]) * scale))
+    x0, y0 = crop_origin(box, scale)
     height, width = image.shape[:2]
     pad = max(0, -x0, -y0, x0 + side - width, y0 + side - height)
     if pad:
@@ -41,7 +46,13 @@ def ellipse_cutout(rgb: np.ndarray, box, scale: float = FALLBACK_CROP_SCALE) -> 
 
 
 def seg_cutout(rgb: np.ndarray, box, categories: np.ndarray) -> np.ndarray | None:
-    """精確去背只留臉。
+    """精確去背只留臉；規則見 _seg_cutout。"""
+    found = _seg_cutout(rgb, box, categories)
+    return found[0] if found is not None else None
+
+
+def _seg_cutout(rgb: np.ndarray, box, categories: np.ndarray):
+    """精確去背只留臉，回傳（影像, 裁切的正方形）。
 
     取和臉框重疊最多的「臉部皮膚」區塊，加上臉框內、眼睛高度的飾品（眼鏡），再取凸包補齊被瀏海、
     帽子、眼鏡切掉的缺口；頭帶、帽子、耳環不收。依保留區域外框裁成正方形，其餘填中性灰。
@@ -75,10 +86,18 @@ def seg_cutout(rgb: np.ndarray, box, categories: np.ndarray) -> np.ndarray | Non
     crop = square_crop(rgb, square, 1.0)
     mask = square_crop(keep.astype(np.float32), square, 1.0)
     mask = cv2.GaussianBlur(mask, (3, 3), 0)[..., None]
-    return (crop * mask + np.array(MASK_FILL, np.float32) * (1 - mask)).astype(np.uint8)
+    return (crop * mask + np.array(MASK_FILL, np.float32) * (1 - mask)).astype(np.uint8), square
+
+
+def face_input_with_origin(rgb: np.ndarray, box, categories: np.ndarray):
+    """給 CLIP 的輸入，以及它的左上角在原圖的座標（測試畫面把相似部位畫回原圖用）。"""
+    found = _seg_cutout(rgb, box, categories)
+    if found is not None:
+        cutout, square = found
+        return cutout, crop_origin(square, 1.0)
+    return ellipse_cutout(rgb, box), crop_origin(box, FALLBACK_CROP_SCALE)
 
 
 def face_input(rgb: np.ndarray, box, categories: np.ndarray) -> np.ndarray:
     """給 CLIP 的輸入：精確去背成功就用它，否則退回橢圓去背。"""
-    cutout = seg_cutout(rgb, box, categories)
-    return cutout if cutout is not None else ellipse_cutout(rgb, box)
+    return face_input_with_origin(rgb, box, categories)[0]

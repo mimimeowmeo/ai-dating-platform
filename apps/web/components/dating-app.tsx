@@ -47,7 +47,12 @@ import {
   useAuth,
   genderLabels,
   genderText,
+  type AppearanceExplainState,
+  type AppearanceExplanation,
   type Card,
+  type DiscoveryAnchor,
+  type DiscoveryExplain,
+  type FaceRegion,
   type SearchCard,
   type Profile,
   type Preferences,
@@ -935,57 +940,495 @@ type Person = Pick<
   | "datingGoals"
   | "photos"
   | "isVerified"
->;
+> & { userId?: string };
 function PersonCard({
   person,
+  explain,
   children,
 }: {
   person: Person;
+  // 測試用（探索頁網址帶 ?debug=explain）：推薦依據。
+  explain?: DiscoveryExplain;
   children?: React.ReactNode;
+}) {
+  const shared = new Set(explain?.sharedTags ?? []);
+  // 測試用：點推薦依據裡「最像的人」的名字，把兩個人並排比較。
+  const [comparing, setComparing] = useState(false);
+  const card = useRef<HTMLElement>(null);
+  const anchor = explain?.appearance?.anchor ?? null;
+  const compare = comparing && person.userId ? anchor : null;
+  function toggleCompare() {
+    setComparing((open) => !open);
+    card.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  return (
+    <article
+      ref={card}
+      className={compare ? "person-card comparing" : "person-card"}
+    >
+      {explain && <RecommendationBadge explain={explain} />}
+      {compare && person.userId ? (
+        <CompareView
+          candidateId={person.userId}
+          person={person}
+          shared={shared}
+          anchor={compare}
+          similarity={explain?.appearance?.similarity ?? null}
+          onClose={() => setComparing(false)}
+        />
+      ) : (
+        <div className="person-photo">
+          <Portrait person={person} large />
+        </div>
+      )}
+      <div className="person-info">
+        {!compare && <PersonDetails person={person} shared={shared} />}
+        {children}
+        {explain && (
+          <RecommendationWhy
+            explain={explain}
+            comparing={!!compare}
+            onCompare={toggleCompare}
+          />
+        )}
+      </div>
+    </article>
+  );
+}
+// 卡片的文字區：名字、城市、身高、關係期待、自我介紹、標籤；shared 裡的標籤標亮（測試用）。
+function PersonDetails({
+  person,
+  shared,
+  eyebrow = "NICE TO MEET YOU",
+}: {
+  person: Person;
+  shared: Set<string>;
+  eyebrow?: string;
 }) {
   const tags = person.traits ?? [];
   return (
-    <article className="person-card">
-      <div className="person-photo">
-        <Portrait person={person} large />
+    <>
+      <span className="eyebrow">{eyebrow}</span>
+      <h2>
+        {person.displayName}
+        <span>{person.age}</span>
+        <GenderTag gender={person.gender} />
+        {person.isVerified && <ShieldCheck size={24} aria-label="已通過驗證" />}
+      </h2>
+      <p className="person-meta">
+        <MapPin size={15} />
+        {[
+          person.city,
+          person.heightCm && `${person.heightCm} 公分`,
+          goalText(person.datingGoals),
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </p>
+      <p className="field-label">關於我</p>
+      <p className="person-bio">
+        {person.bio || "有些故事，適合在對話裡慢慢認識。"}
+      </p>
+      {tags.length > 0 && (
+        <>
+          <p className="field-label">我的小小熱愛</p>
+          <div className="tags hash">
+            {tags.map((code) => (
+              <span
+                key={code}
+                className={shared.has(code) ? "tag-match" : undefined}
+              >
+                {traitLabel(code)}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+// 前三名的框色，順序和說明裡的編號一致。
+const FACE_COLORS = ["#e4749f", "#9270b1", "#e89a2c"];
+const FACE_LABELS: Record<FaceRegion, string> = {
+  eyebrows: "眉毛",
+  eyes: "眼睛",
+  nose: "鼻子",
+  lips: "嘴唇",
+  left_cheek: "左邊臉頰（顴骨）",
+  right_cheek: "右邊臉頰（顴骨）",
+  chin: "下巴",
+};
+type FaceRegionResult = AppearanceExplanation["regions"][number];
+// 和 API 的「計算中」標記一樣長：過期後重新打開比較會重排。
+const EXPLAIN_WAIT_MS = 60_000;
+// 測試用：卡片上的人與「最像你喜歡過的人」並排比較，兩邊都顯示完整的卡片內容。
+// 照片上框出兩張臉最像的部位：遮住該部位後外貌相似度下降最多的前三名（算法見
+// services/recommendation/appearance/explain.py）。框預設打開，可以用開關關掉。
+function CompareView({
+  candidateId,
+  person,
+  shared,
+  anchor,
+  similarity,
+  onClose,
+}: {
+  candidateId: string;
+  person: Person;
+  shared: Set<string>;
+  anchor: DiscoveryAnchor;
+  similarity: number | null;
+  onClose: () => void;
+}) {
+  const [showBoxes, setShowBoxes] = useState(true);
+  const [openedAt] = useState(() => Date.now());
+  const user = useAuth((s) => s.user);
+  const faces = useQuery<AppearanceExplainState>({
+    queryKey: ["/discovery/explain-appearance", candidateId, user?.id],
+    queryFn: () =>
+      api<AppearanceExplainState>(
+        `/discovery/explain-appearance?candidate=${candidateId}`,
+      ),
+    enabled: !!user,
+    retry: false,
+    // worker 算好之前每秒再問一次；超過 1 分鐘（例如 worker 處理失敗）就不再問。
+    refetchInterval: (query) =>
+      query.state.data?.status === "pending" &&
+      Date.now() - openedAt < EXPLAIN_WAIT_MS
+        ? 1000
+        : false,
+  });
+  const timedOut =
+    faces.data?.status === "pending" &&
+    faces.dataUpdatedAt - openedAt >= EXPLAIN_WAIT_MS;
+  const anchorCard = useData<Card>(`/profile/${anchor.userId}`);
+  const me = useData<Profile | null>("/profile");
+  const result =
+    faces.data?.status === "ready" ? (faces.data.result ?? null) : undefined;
+  const top = (result?.regions ?? [])
+    .filter((region) => region.drop > 0)
+    .slice(0, FACE_COLORS.length);
+  const rest = (result?.regions ?? []).filter(
+    (region) => !top.includes(region),
+  );
+  const boxes = showBoxes ? top : [];
+  const candidatePhoto =
+    faces.data?.candidatePhotoUrl ??
+    (person.photos.find((photo) => photo.isAvatar) ?? person.photos[0])?.url ??
+    null;
+  return (
+    <div className="compare">
+      <div className="compare-photos">
+        <ComparePhoto
+          name={person.displayName}
+          url={candidatePhoto}
+          size={result?.candidate}
+          regions={boxes}
+          side="candidate"
+        >
+          這張卡片的人
+        </ComparePhoto>
+        <ComparePhoto
+          name={anchor.displayName}
+          url={faces.data?.anchorPhotoUrl ?? anchor.photoUrl}
+          size={result?.anchor}
+          regions={boxes}
+          side="anchor"
+        >
+          你喜歡過的<strong>{anchor.displayName}</strong>
+          {similarity !== null && <span>・相似度 {similarity.toFixed(3)}</span>}
+        </ComparePhoto>
       </div>
-      <div className="person-info">
-        <span className="eyebrow">NICE TO MEET YOU</span>
-        <h2>
-          {person.displayName}
-          <span>{person.age}</span>
-          <GenderTag gender={person.gender} />
-          {person.isVerified && (
-            <ShieldCheck size={24} aria-label="已通過驗證" />
-          )}
-        </h2>
-        <p className="person-meta">
-          <MapPin size={15} />
-          {[
-            person.city,
-            person.heightCm && `${person.heightCm} 公分`,
-            goalText(person.datingGoals),
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </p>
-        <p className="field-label">關於我</p>
-        <p className="person-bio">
-          {person.bio || "有些故事，適合在對話裡慢慢認識。"}
-        </p>
-        {tags.length > 0 && (
+      <div className="compare-tools">
+        <label className="face-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            checked={showBoxes}
+            onChange={(event) => setShowBoxes(event.target.checked)}
+          />
+          標示相似部位
+        </label>
+        <button type="button" className="compare-close" onClick={onClose}>
+          關閉比較
+        </button>
+      </div>
+      <div className="face-legend" role="status">
+        {faces.isError ? (
+          <p>{faces.error.message}</p>
+        ) : timedOut ? (
+          <p>分析逾時，請關閉比較後再試一次。</p>
+        ) : result === undefined ? (
+          <p>正在分析兩張臉最像的部位…</p>
+        ) : result === null ? (
+          <p>有一張照片找不到臉部特徵點，無法標示。</p>
+        ) : (
           <>
-            <p className="field-label">我的小小熱愛</p>
-            <div className="tags hash">
-              {tags.map((code) => (
-                <span key={code}>{traitLabel(code)}</span>
-              ))}
-            </div>
+            <p>
+              最像的部位：把該部位遮住後，外貌相似度下降越多，代表模型越是靠這裡判斷兩人像。
+            </p>
+            {top.length ? (
+              <ol>
+                {top.map((region, i) => (
+                  <li key={region.name}>
+                    <i style={{ background: FACE_COLORS[i] }} />
+                    {i + 1}. {FACE_LABELS[region.name]}：下降{" "}
+                    {region.drop.toFixed(3)}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p>遮住任何一個部位，相似度都沒有下降，找不出特別像的地方。</p>
+            )}
+            {rest.length > 0 && (
+              <p className="face-rest">
+                其他部位的下降量：
+                {rest
+                  .map(
+                    (region) =>
+                      `${FACE_LABELS[region.name]} ${region.drop.toFixed(3)}`,
+                  )
+                  .join("、")}
+                {rest.some((region) => region.drop < 0) &&
+                  "（負數代表遮住後反而更像）"}
+              </p>
+            )}
           </>
         )}
-        {children}
       </div>
-    </article>
+      <div className="compare-details">
+        <div className="person-info">
+          <PersonDetails
+            person={person}
+            shared={shared}
+            eyebrow="這張卡片的人"
+          />
+        </div>
+        <div className="person-info">
+          {anchorCard.data ? (
+            <PersonDetails
+              person={anchorCard.data}
+              shared={new Set(me.data?.traits ?? [])}
+              eyebrow="你喜歡過、最像的人"
+            />
+          ) : (
+            <p className="field-label">
+              {anchorCard.isError
+                ? anchorCard.error.message
+                : "正在載入對方的卡片…"}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+// 並排比較的一張照片，疊上框。框的座標是原始照片的像素：viewBox 用原始尺寸，
+// slice 和照片的 object-fit: cover（置中裁切）對齊，照片怎麼縮放框都跟著。
+function ComparePhoto({
+  name,
+  url,
+  size,
+  regions,
+  side,
+  children,
+}: {
+  name: string;
+  url: string | null;
+  size?: { width: number; height: number };
+  regions: FaceRegionResult[];
+  side: "candidate" | "anchor";
+  children: React.ReactNode;
+}) {
+  // 編號圓圈的大小跟著照片尺寸，照片大小不同時看起來一樣大。
+  const unit = size ? Math.max(size.width, size.height) / 100 : 1;
+  return (
+    <figure>
+      <div className="person-photo compare-photo">
+        <Portrait
+          person={{ displayName: name, photos: url ? [{ url }] : [] }}
+          large
+        />
+        {size && regions.length > 0 && (
+          <svg
+            className="face-boxes"
+            viewBox={`0 0 ${size.width} ${size.height}`}
+            preserveAspectRatio="xMidYMid slice"
+            aria-hidden="true"
+          >
+            {regions.map((region, i) => {
+              const [first] = region[side];
+              return (
+                <g key={region.name} color={FACE_COLORS[i]}>
+                  {region[side].map(([x, y, w, h]) => (
+                    <rect
+                      key={`${x}-${y}`}
+                      x={x}
+                      y={y}
+                      width={w}
+                      height={h}
+                      rx={unit * 0.6}
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2.5}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ))}
+                  {first && (
+                    <>
+                      <circle
+                        cx={first[0]}
+                        cy={first[1]}
+                        r={unit * 2.2}
+                        fill="currentColor"
+                      />
+                      <text
+                        x={first[0]}
+                        y={first[1]}
+                        fill="#fff"
+                        fontSize={unit * 2.8}
+                        fontWeight={700}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                      >
+                        {i + 1}
+                      </text>
+                    </>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
+        )}
+      </div>
+      <figcaption>{children}</figcaption>
+    </figure>
+  );
+}
+const sourceLabels = {
+  recommended: "推薦卡",
+  exploration: "未推薦卡",
+  latest: "最新註冊",
+};
+const sourceHints = {
+  recommended: "依外貌與個人標籤的合併分數，從排名最前面依序挑出",
+  exploration: "刻意從推薦排名之後隨機挑出，讓你有機會看到其他類型",
+  latest: "AI 排序暫時失敗，照最新註冊的順序",
+};
+// 百分位 0～1 換成「贏過幾 % 的候選人」。
+const beats = (percentile: number | null) =>
+  Math.round((percentile ?? 0) * 100);
+// 測試用：卡片右上角標示推薦卡或未推薦卡，以及合併分數（0～100，越高越推薦）。
+function RecommendationBadge({ explain }: { explain: DiscoveryExplain }) {
+  return (
+    <div
+      className={`rec-badge ${explain.source}`}
+      title={sourceHints[explain.source]}
+    >
+      <strong>{sourceLabels[explain.source]}</strong>
+      {explain.score !== null && (
+        <span>{Math.round(explain.score * 100)} 分</span>
+      )}
+    </div>
+  );
+}
+// 測試用：這張卡為什麼出現，分數怎麼來；標亮的標籤是和你相同的標籤。
+function RecommendationWhy({
+  explain,
+  comparing,
+  onCompare,
+}: {
+  explain: DiscoveryExplain;
+  comparing: boolean;
+  onCompare: () => void;
+}) {
+  const { appearance, interest, appearanceWeight: weight } = explain;
+  const appearanceUsed = !!appearance && !!weight;
+  return (
+    <section className="rec-why" aria-label="推薦依據（測試用）">
+      <p className="field-label">為什麼出現這張卡（測試用）</p>
+      <ul>
+        <li>
+          {explain.source === "recommended" &&
+            `推薦卡：合併分數在 ${explain.poolSize} 位候選人裡排第 ${explain.rank} 名。`}
+          {explain.source === "exploration" &&
+            `未推薦卡：從推薦排名第 ${explain.recommendedCount + 1} 名以後隨機挑出（這位排第 ${explain.rank} 名），讓你有機會看到其他類型。`}
+          {explain.source === "latest" &&
+            `AI 排序暫時失敗，照最新註冊的順序（第 ${explain.rank} 位）。`}
+        </li>
+        {explain.score !== null && weight !== null && (
+          <li>
+            合併分數 {Math.round(explain.score * 100)} 分 =
+            {weight > 0 &&
+              ` 外貌 ${Math.round(weight * 100)}% × ${beats(appearance?.percentile ?? null)}`}
+            {weight > 0 && weight < 1 && " ＋"}
+            {weight < 1 &&
+              ` 個人標籤 ${Math.round((1 - weight) * 100)}% × ${beats(interest?.percentile ?? null)}`}
+            （數字是外貌、個人標籤分數各自贏過多少 % 的候選人）
+          </li>
+        )}
+        {appearance && !appearanceUsed && (
+          <li>外貌：你還沒按過有外貌向量的人喜歡，這次不列入外貌分數。</li>
+        )}
+        {appearanceUsed && appearance.similarity === null && (
+          <li>
+            外貌：這位的照片沒有外貌向量（找不到臉或還沒算好），外貌給中間值（贏過
+            50% 的候選人）。
+          </li>
+        )}
+        {appearanceUsed && appearance.similarity !== null && (
+          <li className="rec-anchor">
+            外貌：最像你喜歡過的
+            {appearance.anchor?.photoUrl && (
+              <img src={appearance.anchor.photoUrl} alt="" />
+            )}
+            {appearance.anchor && (
+              <button
+                type="button"
+                className="link-button"
+                aria-pressed={comparing}
+                title="兩張照片並排比較"
+                onClick={onCompare}
+              >
+                {appearance.anchor.displayName}
+              </button>
+            )}
+            ，相似度 {appearance.similarity.toFixed(3)}
+            {appearance.percentile !== null &&
+              `，外貌贏過 ${beats(appearance.percentile)}% 的候選人`}
+            。
+          </li>
+        )}
+        {appearanceUsed && !!appearance.nearPass && (
+          <li>
+            {appearance.penalty
+              ? `略過扣分：長得像的人裡有 ${appearance.nearPass} 位你略過、${appearance.nearLike ?? 0} 位你喜歡過，外貌扣 ${appearance.penalty.toFixed(3)}。`
+              : `長得像的人裡有 ${appearance.nearPass} 位你略過，未滿 5 位不扣分。`}
+          </li>
+        )}
+        {interest && (
+          <li>
+            個人標籤：分數 {(interest.score ?? 0).toFixed(3)}
+            {interest.percentile !== null &&
+              `，贏過 ${beats(interest.percentile)}% 的候選人`}
+            ；標亮的標籤是你們共同的。
+            <ul>
+              {interest.categories
+                .filter((c) => c.union > 0)
+                .map((c) => (
+                  <li key={c.category}>
+                    {categoryTitle(c.category)}（權重{" "}
+                    {Math.round(c.weight * 100)}%）：
+                    {c.shared.length
+                      ? c.shared.map(traitLabel).join("、")
+                      : "沒有共同的"}
+                    （{c.shared.length}／{c.union}）
+                  </li>
+                ))}
+            </ul>
+          </li>
+        )}
+      </ul>
+    </section>
   );
 }
 function PersonDialog({
@@ -1028,18 +1471,38 @@ function PersonDialog({
     </dialog>
   );
 }
-// 探索排序的測試開關：網址帶 ?hardfilter=false、?appearance=false、?interest=false 就原樣轉給 API。
+// 探索頁的測試參數（說明見 docs/testing/QUERY-PARAMS.md）：prefs、rank、debug 原樣轉給 API，
+// 值不對時 API 回錯誤訊息，顯示在探索頁上方。debug=search 只影響這裡（改顯示測試用搜尋列）。
 function discoveryPath(params: URLSearchParams) {
   const flags = new URLSearchParams();
-  for (const flag of ["hardfilter", "appearance", "interest"])
-    if (params.get(flag) === "false") flags.set(flag, "false");
+  for (const name of ["prefs", "rank", "debug"])
+    for (const value of params.getAll(name)) flags.append(name, value);
   return flags.size ? `/discovery?${flags}` : "/discovery";
+}
+const debugModes = (params: URLSearchParams) =>
+  params
+    .getAll("debug")
+    .flatMap((value) => value.split(",").map((v) => v.trim()));
+// 2026-09-28 改名前的參數：帶了舊名字時提示新寫法，舊名字已經沒有作用。
+const renamedParams: Record<string, string> = {
+  test: "test=true 改成 debug=explain",
+  muggle: "muggle=false 改成 debug=search",
+  hardfilter: "hardfilter=false 改成 prefs=off",
+  appearance: "appearance=false 改成 rank=tags",
+  interest: "interest=false 改成 rank=face",
+};
+function renamedHint(params: URLSearchParams) {
+  const renamed = Object.keys(renamedParams).filter((name) => params.has(name));
+  return renamed.length
+    ? `網址參數已改名：${renamed.map((name) => renamedParams[name]).join("；")}（說明見 docs/testing/QUERY-PARAMS.md）`
+    : "";
 }
 // 開關會讓探索的 query key 帶上參數，失效時要用前綴比對。
 const isDiscoveryQuery = (q: { queryKey: readonly unknown[] }) =>
   String(q.queryKey[0]).startsWith("/discovery");
 function Discover() {
-  const query = useData<Card[]>(discoveryPath(useSearchParams()));
+  const params = useSearchParams();
+  const query = useData<Card[]>(discoveryPath(params));
   const profile = useData<Profile | null>("/profile");
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
@@ -1084,6 +1547,7 @@ function Discover() {
       </Heading>
       <div className="discover-layout">
         <section className="discover-main" aria-label="為你探索">
+          <ErrorText message={renamedHint(params)} />
           <ErrorText message={error || query.error?.message} />
           {match && (
             <div className="success" role="status">
@@ -1096,7 +1560,7 @@ function Discover() {
           )}
           {/* useSearchParams 依官方建議包在 Suspense 裡。 */}
           <Suspense fallback={<Loading />}>
-            <MuggleSwitch
+            <SearchSwitch
               search={
                 <UserSearch
                   busy={busy}
@@ -1108,7 +1572,7 @@ function Discover() {
             >
               {query.isLoading ? (
                 <Loading />
-              ) : !profile.data ? (
+              ) : query.isError ? null : !profile.data ? (
                 <Empty
                   title="先讓大家認識你"
                   text="完成個人資料與城市，開始探索彼此適合的人。"
@@ -1123,14 +1587,18 @@ function Discover() {
                   label="調整探索範圍"
                 />
               ) : (
-                <PersonCard person={person}>
+                <PersonCard
+                  key={person.userId}
+                  person={person}
+                  explain={person.explain}
+                >
                   <DiscoveryActions
                     busy={busy}
                     onAct={(action) => act(person, action)}
                   />
                 </PersonCard>
               )}
-            </MuggleSwitch>
+            </SearchSwitch>
           </Suspense>
           <p className="soft-note">
             <HeartIcon size={15} />
@@ -1170,15 +1638,15 @@ function DiscoveryActions({
     </div>
   );
 }
-// 網址帶 ?muggle=false 時改顯示測試用搜尋列，原本的探索卡片先隱藏。
-function MuggleSwitch({
+// 網址帶 ?debug=search 時改顯示測試用搜尋列，原本的探索卡片先隱藏。
+function SearchSwitch({
   search,
   children,
 }: {
   search: React.ReactNode;
   children: React.ReactNode;
 }) {
-  return useSearchParams().get("muggle") === "false" ? search : children;
+  return debugModes(useSearchParams()).includes("search") ? search : children;
 }
 // 搜尋結果的狀態說明；一張卡片可能同時有好幾項（例如封鎖中又按過喜歡）。
 function searchNotes(s: SearchCard["searchState"]) {

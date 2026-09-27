@@ -7,10 +7,13 @@ import unittest
 from pathlib import Path
 
 from appearance.pipeline import MODEL_VERSION, InvalidImage
-from app.worker import JOB_NAME, ONLINE_KEY, RESULT_JOB_OPTIONS, maintain_heartbeat, make_processor
+from app.worker import EXPLAIN_JOB, JOB_NAME, ONLINE_KEY, RESULT_JOB_OPTIONS, maintain_heartbeat, make_processor
 
 PHOTO_ID = "5f0c2b1e-8a3d-4c7e-9b1a-2d3e4f5a6b7c"
+ANCHOR_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 IMAGE = base64.b64encode(b"jpeg-bytes").decode()
+ANCHOR_IMAGE = base64.b64encode(b"anchor-bytes").decode()
+DIRECTION = [0] * 511 + [1]
 
 
 class FakeJob:
@@ -40,6 +43,12 @@ class FakeEmbedder:
 
     def embed(self, image):
         self.images.append(image)
+        if self.error:
+            raise self.error
+        return self.result
+
+    def explain(self, candidate, anchor, direction):
+        self.images.append((candidate, anchor, direction))
         if self.error:
             raise self.error
         return self.result
@@ -84,6 +93,48 @@ class ProcessTest(unittest.IsolatedAsyncioTestCase):
             await self.run_job(FakeJob({"photoId": PHOTO_ID, "image": "%%% not base64"}))
         with self.assertRaisesRegex(ValueError, "^INVALID_IMAGE$"):
             await self.run_job(FakeJob({"photoId": PHOTO_ID, "image": IMAGE}), FakeEmbedder(error=InvalidImage("x")))
+
+
+class ExplainTest(unittest.IsolatedAsyncioTestCase):
+    def job(self, **extra):
+        data = {"requestId": f"{PHOTO_ID}:{ANCHOR_ID}", "candidate": IMAGE, "anchor": ANCHOR_IMAGE, **extra}
+        return FakeJob(data, name=EXPLAIN_JOB)
+
+    async def run_job(self, job, embedder):
+        results = FakeResults()
+        return await make_processor(embedder, results)(job, "token"), results
+
+    async def test_explains_pair_and_posts_result(self):
+        embedder = FakeEmbedder({"similarity": 0.9, "regions": []})
+        job = self.job(direction=DIRECTION, directionVersion=MODEL_VERSION)
+        value, results = await self.run_job(job, embedder)
+        self.assertEqual(job.updates, [{"redacted": True}])
+        self.assertEqual(embedder.images, [(b"jpeg-bytes", b"anchor-bytes", [0.0] * 511 + [1.0])])
+        self.assertEqual(
+            results.added,
+            [(EXPLAIN_JOB, {"requestId": f"{PHOTO_ID}:{ANCHOR_ID}", "result": {"similarity": 0.9, "regions": []}}, RESULT_JOB_OPTIONS)],
+        )
+        self.assertTrue(value["explained"])
+
+    async def test_direction_from_another_model_is_ignored(self):
+        embedder = FakeEmbedder(None)
+        value, results = await self.run_job(self.job(direction=DIRECTION, directionVersion="old"), embedder)
+        self.assertIsNone(embedder.images[0][2])
+        self.assertIsNone(results.added[0][1]["result"])
+        self.assertFalse(value["explained"])
+
+    async def test_invalid_input_raises_fixed_code(self):
+        for extra in ({"requestId": PHOTO_ID}, {"direction": [0.1] * 3}, {"photoId": PHOTO_ID}):
+            job = self.job(**extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "^INVALID_JOB_INPUT$"):
+                await self.run_job(job, FakeEmbedder())
+            self.assertEqual(job.data, {"redacted": True})
+
+    async def test_bad_image_raises_fixed_code(self):
+        with self.assertRaisesRegex(ValueError, "^INVALID_IMAGE$"):
+            await self.run_job(self.job(anchor="%%% not base64"), FakeEmbedder())
+        with self.assertRaisesRegex(ValueError, "^INVALID_IMAGE$"):
+            await self.run_job(self.job(), FakeEmbedder(error=InvalidImage("x")))
 
 
 class FakeRedis:

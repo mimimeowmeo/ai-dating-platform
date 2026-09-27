@@ -10,6 +10,7 @@ from appearance.cutout import (
     SEG_ACCESSORY,
     SEG_FACE,
     face_input,
+    face_input_with_origin,
     seg_cutout,
 )
 
@@ -71,6 +72,29 @@ class FaceInputTest(unittest.TestCase):
     def test_uses_segmentation_when_available(self):
         rgb, categories = scene()
         np.testing.assert_array_equal(face_input(rgb, BOX, categories), seg_cutout(rgb, BOX, categories))
+
+class OriginTest(unittest.TestCase):
+    """face_input_with_origin 回報的左上角，要能把去背後的像素對回原圖（測試畫面畫框用）。"""
+
+    def assert_maps_back(self, rgb, cutout, origin):
+        side = cutout.shape[0]
+        u, v = side // 2, side // 2
+        self.assertTrue(np.array_equal(cutout[v, u], rgb[origin[1] + v, origin[0] + u]))
+
+    def test_segmentation_origin(self):
+        rgb, categories = scene()
+        cutout, origin = face_input_with_origin(rgb, BOX, categories)
+        self.assertTrue(np.array_equal(cutout, seg_cutout(rgb, BOX, categories)))
+        self.assert_maps_back(rgb, cutout, origin)
+
+    def test_fallback_origin(self):
+        rgb, _ = scene()
+        empty = np.zeros(rgb.shape[:2], np.uint8)
+        cutout, origin = face_input_with_origin(rgb, BOX, empty)
+        self.assertTrue(np.array_equal(cutout, face_input(rgb, BOX, empty)))
+        side = int(round(max(BOX[2], BOX[3]) * FALLBACK_CROP_SCALE))
+        self.assertEqual(origin, (int(round(BOX[0] + BOX[2] / 2 - side / 2)), int(round(BOX[1] + BOX[3] / 2 - side / 2))))
+        self.assert_maps_back(rgb, cutout, origin)
 
 
 if __name__ == "__main__":
