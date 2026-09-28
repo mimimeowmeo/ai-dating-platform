@@ -1,0 +1,5 @@
+# 選配：experiments/recommend_bio_llm_extract.py 的 --live 模式才需要。dry-run 有裝就用 SDK 的 TypedDict 組 payload、沒裝就退回普通 dict，都不連網。
+# 安裝：uv pip install --python .venv/bin/python -r requirements-llm.txt
+# 注意：anthropic 1.x 需要 Python >= 3.10，HTTP 層是 httpx2（不是 httpx）。
+# 憑證：export ANTHROPIC_API_KEY=... 或 ant auth login；不要把 key 寫進程式或 repo。
+anthropic>=1.7
