@@ -1,0 +1,6 @@
+# 選配：句子嵌入（experiments/recommend_bio_embeddings.py 的 --model 模式才需要；dry-run 不需要）。
+# 安裝：uv pip install --python .venv/bin/python -r requirements-embeddings.txt
+# 注意：安裝套件本身不會下載模型；第一次用 --model 執行時才會從 Hugging Face 下載權重
+#       （multilingual-e5-small / paraphrase-multilingual-MiniLM-L12-v2 約 490 MB，BAAI/bge-m3 約 2.3 GB）。
+sentence-transformers>=6.1
+torch>=2.14

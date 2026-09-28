@@ -1,0 +1,10 @@
+# 用 uv 建環境：uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt
+numpy>=2.5
+pandas>=3.0
+scikit-learn>=1.9
+scipy>=1.18
+matplotlib>=3.11
+kmodes>=0.12
+joblib>=1.6
+# 選配：LightGBM 的 lambdarank 排序目標。macOS 需先 `brew install libomp` 才能載入。
+# lightgbm>=4.6
