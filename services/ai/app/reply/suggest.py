@@ -6,11 +6,13 @@
    開場與重啟 B 100%，回覆 A 80%／B 20%，追問只用 A 的語氣。
 3. 完全沒有資料根據時（見 has_topic_basis）不呼叫模型，直接回「沒有可推薦的句子」。
 4. 計算 B 在這個聊天室的反應熱度；追問時找出 A 上一則還沒得到回答的問題。
-5. 組 prompt（開場、追問、重啟從 B 最近的聊天主題找話題，見 prompts.build_reply_prompt），
-   請模型產生最多 5 則候選（結構化輸出；沒有依據時可以少給甚至不給，不硬湊）。
-6. 後處理：單行化、簡轉繁、80 字上限與安全規則、去重。
-7. 排序：回覆時 B 剛問了問題，回答類優先；開場、追問、重啟時問句優先；再依模型給的優先度，
+5. 開場、追問、重啟先排好【這次的話題安排】（A 也聊過 2、A 的興趣 1、熱門 2，見 topic_plan；2026-09-29）。
+6. 組 prompt（見 prompts.build_reply_prompt），請模型產生最多 5 則候選
+   （結構化輸出；沒有依據時可以少給甚至不給，不硬湊）。
+7. 後處理：單行化、簡轉繁、80 字上限與安全規則、去重。
+8. 排序：回覆時 B 剛問了問題，回答類優先；開場、追問、重啟時問句優先；再依模型給的優先度，
    最後依離風格目標多近。追問的 5 則裡「換個說法重問」與「新話題」兩種都要有。
+   有話題安排時，則數不超過安排的話題數（追問再加 1 則重問）：話題不夠就少給。
 """
 
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from pydantic_ai import Agent
 from pydantic_ai.models import Model
 
 from ..config import Settings
+from .embeddings import Embedder
 from .llm import build_chain, model_name_of, run_agent, structured_output, usage_info
 from .prompts import REPLY_INSTRUCTIONS, REPLY_PROMPT_VERSION, TOPIC_MODES, build_reply_prompt
 from .safety import check_suggestion
@@ -40,6 +43,7 @@ from .schemas import (
 )
 from .style import SITE_DEFAULT_STATS, partner_reactions, resolve_target, style_distance, usable_card
 from .textutil import as_utc, has_question, single_line, text_similarity, to_taiwan_traditional, visible_chars
+from .topic_plan import TopicPlan, TopicPlanner
 
 MIN_RETURN = 3
 MAX_RETURN = 5
@@ -176,32 +180,42 @@ def clean_drafts(
     return kept, rejected
 
 
-def _include_both_kinds(ranked: list[Candidate]) -> list[Candidate]:
-    """追問：最多 5 則裡，「換個說法重問」（intent=reask）與「新話題」兩種都要有（2026-09-27 使用者決定）。
+def _include_both_kinds(ranked: list[Candidate], limit: int = MAX_RETURN) -> list[Candidate]:
+    """追問：最多 limit 則裡，「換個說法重問」（intent=reask）與「新話題」兩種都要有（2026-09-27 使用者決定）。
 
-    排好序的前 5 則如果只有其中一種，而第 5 名之後還有另一種，就用另一種最好的那則換掉第 5 名。
+    排好序的前 limit 則如果只有其中一種，而後面還有另一種，就用另一種最好的那則換掉最後一名。
     """
-    chosen = ranked[:MAX_RETURN]
+    chosen = ranked[:limit]
     for wanted in (True, False):
-        if len(chosen) < MAX_RETURN or any((item.draft.intent == "reask") == wanted for item in chosen):
+        if len(chosen) < limit or any((item.draft.intent == "reask") == wanted for item in chosen):
             continue
-        extra = next((item for item in ranked[MAX_RETURN:] if (item.draft.intent == "reask") == wanted), None)
+        extra = next((item for item in ranked[limit:] if (item.draft.intent == "reask") == wanted), None)
         if extra is not None:
             chosen = [*chosen[:-1], extra]
     return chosen
 
 
+def suggestion_limit(plan: TopicPlan | None, reask: bool) -> int:
+    """這一批最多留幾則：有話題安排時是安排的話題數（追問另加 1 則重問），不超過 5；沒有安排時是 5。
+
+    話題不夠就少給（不硬湊，2026-09-29 使用者決定）：模型多寫的會以 OVER_LIMIT 記錄下來。
+    """
+    if plan is None or plan.size == 0:
+        return MAX_RETURN
+    return min(MAX_RETURN, plan.size + (1 if reask else 0))
+
+
 def rank_candidates(
-    drafts: list[DraftSuggestion], target: StyleTarget, mode: Mode, answer_first: bool
+    drafts: list[DraftSuggestion], target: StyleTarget, mode: Mode, answer_first: bool, limit: int = MAX_RETURN
 ) -> tuple[list[Suggestion], list[RejectedSuggestion]]:
-    """排序並編號（規格 4.1），回傳最多 5 則推薦，以及因為超過 5 則而被捨棄的候選。
+    """排序並編號（規格 4.1），回傳最多 limit 則推薦（預設 5），以及因為超過上限而被捨棄的候選。
 
     一批 5 則共用同一個風格目標（見 style.resolve_target），所以每一名的排序規則都一樣：
     1. 回覆模式下 B 剛問了問題時（answer_first），「回答」類排前面；
     2. 開場、追問、重啟要用問句引導 B 分享，問句排前面（程式不硬刪非問句，只往後排）；
     3. 模型給的 priority（1 最推薦）；
     4. 離風格目標越近越前面。
-    追問時前 5 則裡「換個說法重問」與「新話題」兩種都要有（見 _include_both_kinds）。
+    追問時留下的幾則裡「換個說法重問」與「新話題」兩種都要有（見 _include_both_kinds）。
     第 1 名會被前端用打字動畫填進輸入框。
     styleTarget 依這一批的規則標示：目標完全照 B（開場、重啟，而且 B 有資料）時是 partner，其餘都是 blend。
     """
@@ -220,7 +234,7 @@ def rank_candidates(
             item.distance,
         )
     )
-    chosen = _include_both_kinds(candidates) if mode == "follow_up" else candidates[:MAX_RETURN]
+    chosen = _include_both_kinds(candidates, limit) if mode == "follow_up" else candidates[:limit]
     suggestions = [
         Suggestion(
             rank=index + 1,
@@ -259,13 +273,15 @@ class ReplySuggester:
 
     model 參數讓測試可以注入 Pydantic AI 的測試模型；不給時依設定建立 Gemini 備援鏈，
     而且等到第一次使用才建立（服務啟動時不需要 API key）。
+    embedder 給話題安排比對「相近的話題」用（見 topic_plan）；不給時只比對文字是否相同。
     """
 
-    def __init__(self, settings: Settings, model: Model | None = None):
+    def __init__(self, settings: Settings, model: Model | None = None, embedder: Embedder | None = None):
         """保存設定並建立產生推薦的 agent（agent 本身不綁模型，每次執行時才指定）。"""
         self.settings = settings
         self._model = model
         self._model_built = model is not None
+        self.planner = TopicPlanner(embedder)
         # 結構化輸出方式依模型鏈決定（見 llm.structured_output：Ollama Cloud 用 ToolOutput，其餘用 NativeOutput）；
         # retries={"output": 2}：格式或數量不合時，最多再請模型重寫 2 次。
         self.agent = Agent(
@@ -317,8 +333,14 @@ class ReplySuggester:
             )
         reactions = partner_reactions(recent)
         last_question = last_requester_question(recent) if mode == "follow_up" else None
+        # 開場、追問、重啟先排好這一批要聊的話題（2026-09-29，見 topic_plan）；回覆模式不需要。
+        plan = (
+            await self.planner.plan(request, requester_card, partner_card, now, reask=last_question is not None)
+            if mode in TOPIC_MODES
+            else None
+        )
         prompt = build_reply_prompt(
-            request, mode, requester_card, partner_card, target, reactions, recent, last_question
+            request, mode, requester_card, partner_card, target, reactions, recent, last_question, plan
         )
         result = await run_agent(
             self.agent, prompt, self.model, self.settings.llm_timeout_seconds, "LLM_NOT_CONFIGURED", "LLM_UNAVAILABLE"
@@ -326,7 +348,8 @@ class ReplySuggester:
         kept, rejected = clean_drafts(list(result.output.suggestions), list(request.excludeTexts), last_question)
         # 「回答」優先只用在回覆模式；重啟改用開場的做法，不再先回答 B 之前的問題。
         answer_first = mode == "reply" and partner_asked_question(recent)
-        suggestions, overflow = rank_candidates(kept, target, mode, answer_first)
+        limit = suggestion_limit(plan, last_question is not None)
+        suggestions, overflow = rank_candidates(kept, target, mode, answer_first, limit)
         status, notice = notice_for(len(suggestions))
         return ReplySuggestionResponse(
             requestId=request.requestId,

@@ -85,7 +85,7 @@ async def check_ollama(settings: Settings):
 
     section(f"只用萃取模型產生推薦（{settings.extraction_models[0]}，不經備援鏈）")
     reply_settings = replace(settings, reply_models=settings.extraction_models, llm_timeout_seconds=300)
-    await run_suggestions(ReplySuggester(reply_settings), card)
+    await run_suggestions(ReplySuggester(reply_settings, embedder=Embedder(settings)), card)
     return card
 
 
@@ -94,7 +94,7 @@ async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
 
     1. 回覆（B 剛問了「你週末都在幹嘛？」）：整批 A 80%／B 20%，標 blend，回答類排第 1。
     2. 開場（聊天室還沒有任何訊息）：整批照 B 喜歡的樣子寫，標 partner；用問句引導 B 分享，
-       話題看 B 最近在聊的話題。
+       話題照程式排好的話題安排（見 topic_plan；四種話題來源另見 tests.live_topic_plan_smoke）。
     3. 追問（A 問了問題、B 還沒回）：只用 A 的語氣；同時有「換個說法重問」（reask）與新話題。
     4. 重啟（最後一則超過 12 小時）：用開場的做法，整批照 B 喜歡的樣子寫。
     5. 完全沒有資料根據（沒有訊息、沒有共同標籤、雙方只有暱稱與城市）：
@@ -139,7 +139,7 @@ async def run_suggestions(suggester: ReplySuggester, partner_card) -> None:
 async def check_gemini(settings: Settings, partner_card) -> None:
     """有 GEMINI_API_KEY 時：用預設的備援鏈產生推薦（Gemini 是備援），並用 Gemini 做一次向量化。"""
     section(f"備援鏈產生推薦（{' → '.join(settings.reply_models)}）")
-    await run_suggestions(ReplySuggester(settings), partner_card)
+    await run_suggestions(ReplySuggester(settings, embedder=Embedder(settings)), partner_card)
     section(f"Gemini 向量化（{settings.embedding_model}）")
     vectors = await Embedder(settings).embed(["你喜歡爬山嗎", "我家的貓很黏人"], "query")
     print(f"取得 {len(vectors)} 個向量，每個 {len(vectors[0])} 維")
