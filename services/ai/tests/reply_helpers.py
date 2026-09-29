@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 from pydantic_ai import ModelResponse, TextPart, models
@@ -98,6 +99,43 @@ class FakeEmbedder:
             [1.0 if "山" in text else 0.0, 1.0 if "貓" in text else 0.0, 1.0 if "吃" in text else 0.0, 0.1]
             for text in texts
         ]
+
+
+def direction(axis: int, degrees: float = 0.0, size: int = 8) -> list[float]:
+    """size 維的單位向量：從第 axis 軸往下一軸轉 degrees 度。
+
+    同一軸上的兩個向量，相似度就是 cos(角度差)，例如差 20° 是 0.94、差 40° 是 0.77；
+    不同軸的向量幾乎不相似。用來精準控制測試裡兩段文字「有多像」。
+    """
+    values = [0.0] * size
+    radians = math.radians(degrees)
+    values[axis % size] = math.cos(radians)
+    values[(axis + 1) % size] += math.sin(radians)
+    return values
+
+
+class MappedEmbedder:
+    """假的向量服務：每段文字的向量由測試指定（見 direction），沒指定的文字直接報錯，避免測試寫錯還通過。
+
+    calls 記錄每次呼叫的（文字, 用途, 標題）；fail=True 時模擬向量服務暫時無法使用。
+    """
+
+    configured = True
+    model = "fake-embedding"
+
+    def __init__(self, vectors: dict[str, list[float]], fail: bool = False):
+        self.vectors = vectors
+        self.fail = fail
+        self.calls: list[tuple[list[str], str, str | None]] = []
+
+    async def embed(self, texts, purpose="document", title=None):
+        """回傳指定的向量；文字沒有對應的向量時丟 KeyError。"""
+        from app.reply.errors import AIServiceError
+
+        self.calls.append((list(texts), purpose, title))
+        if self.fail:
+            raise AIServiceError("EMBEDDING_UNAVAILABLE")
+        return [self.vectors[text] for text in texts]
 
 
 def json_model(payload, name: str = "fake-model", captured: list | None = None) -> FunctionModel:

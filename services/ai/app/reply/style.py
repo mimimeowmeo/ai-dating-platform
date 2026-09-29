@@ -275,6 +275,16 @@ def has_chat_history(card: StyleCard) -> bool:
     return card.messageCount >= HIGH_CONFIDENCE_MESSAGES
 
 
+def uses_recent_topics(card: StyleCard) -> bool:
+    """開場、追問、重啟找話題時，這個人要用「聊天整理出的話題」還是檔案（標籤與自我介紹）。
+
+    聊天紀錄夠多（≥ 30 則真人訊息，見 has_chat_history），而且風格卡上至少有一條話題特徵句，
+    才用聊天整理出的話題；否則用檔案（2026-09-27 使用者決定：歷史紀錄太少才用主頁原文；
+    2026-09-29 補充：沒有聊天紀錄的一方，話題改用他的標籤與自我介紹，見 topic_plan）。
+    """
+    return has_chat_history(card) and any(facet.kind == "topic" for facet in card.facets)
+
+
 def classify_message_type(text: str) -> MessageType:
     """把 A 的一則（或一輪）訊息粗分成五類，用來統計 B 對哪類訊息反應最熱絡。
 

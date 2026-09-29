@@ -46,10 +46,10 @@ class ReplyAIService:
         style_builder: StyleProfileBuilder | None = None,
         summarizer: ConversationSummarizer | None = None,
     ):
-        """組合各元件；風格卡萃取預設與服務共用同一個向量服務，避免重複建立 client。"""
+        """組合各元件；風格卡萃取與話題安排預設與服務共用同一個向量服務，避免重複建立 client。"""
         self.settings = settings
         self.embedder = embedder or Embedder(settings)
-        self.suggester = suggester or ReplySuggester(settings)
+        self.suggester = suggester or ReplySuggester(settings, embedder=self.embedder)
         self.style_builder = style_builder or StyleProfileBuilder(settings, embedder=self.embedder)
         self.summarizer = summarizer or ConversationSummarizer(settings)
 
