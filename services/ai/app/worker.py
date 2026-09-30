@@ -45,14 +45,13 @@ from .config import Settings
 from .schemas import VerificationRequest
 # InvalidImage：影像不合格的例外；VerificationService：實際做驗證（驗影像 → 呼叫 provider）的服務。
 from .verification import InvalidImage, VerificationService
+# HEARTBEAT_FILE：心跳檔路徑，定義在只用標準函式庫的 worker_health.py，健康檢查才不必載入這整支 worker。
+from .worker_health import HEARTBEAT_FILE
 
 # 這個 worker 監聽的 BullMQ 佇列名稱（生產者要把 job 放進同名佇列）。
 QUEUE_NAME = "ai-verification"
 # 唯一接受的 job 名稱；其他名稱一律拒絕。
 JOB_NAME = "verify"
-# 心跳檔的位置：worker 健康時定期把目前時間寫進去，worker_health.py 讀它判斷 worker 是否健康。
-# 放在 /tmp 是因為容器以非 root 使用者（ai）執行，/tmp 一定可寫。
-HEARTBEAT_FILE = Path("/tmp/ai-worker-heartbeat")
 
 
 def make_processor(service: VerificationService):

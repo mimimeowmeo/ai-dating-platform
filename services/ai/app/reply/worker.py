@@ -12,7 +12,6 @@
 import asyncio
 import contextlib
 import signal
-from pathlib import Path
 
 import redis.asyncio as redis
 from bullmq import Queue, Worker
@@ -24,10 +23,10 @@ from .errors import AIServiceError
 from .priority import OnlinePriority
 from .schemas import ChunkRequest, StyleProfileRequest, SummaryRequest, TopicSpanRequest
 from .service import ReplyAIService, build_service
+from .worker_health import HEARTBEAT_FILE
 
 QUEUE_NAME = "ai-jobs"
 RESULTS_QUEUE = "ai-results"
-HEARTBEAT_FILE = Path("/tmp/ai-reply-worker-heartbeat")
 
 # job 名稱 →（請求格式, 服務方法名稱, 用來當結果 key 的欄位）。規格第 8 節。
 JOBS = {

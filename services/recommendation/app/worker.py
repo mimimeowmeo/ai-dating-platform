@@ -35,12 +35,12 @@ from appearance.pipeline import MODEL_VERSION, AppearanceEmbedder, InvalidImage
 from appearance.explain import REGIONS
 
 from .config import Settings
+from .worker_health import HEARTBEAT_FILE
 
 QUEUE_NAME = "rec-jobs"
 RESULTS_QUEUE = "rec-results"
 JOB_NAME = "embed-appearance"
 EXPLAIN_JOB = "explain-appearance"
-HEARTBEAT_FILE = Path("/tmp/rec-worker-heartbeat")
 ONLINE_KEY = "rec-worker:online"
 ONLINE_TTL_SECONDS = 60
 # NestJS 處理結果失敗時由 BullMQ 以指數退避重試，成功後刪除。結果裡沒有照片，只有向量。
