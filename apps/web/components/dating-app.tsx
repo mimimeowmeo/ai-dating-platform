@@ -549,7 +549,7 @@ export function DatingApp() {
       <div className="workspace">
         <header className="topbar">
           <Logo href={locked ? "/profile" : "/discover"} />
-          <p className="topbar-tagline">讓緣分，從這裡開始。</p>
+          <p className="topbar-tagline">心之所遇，藏在我心♡</p>
           <TopActions user={user} onLogout={logout} locked={locked} />
         </header>
         <main className="main-content">
@@ -775,7 +775,7 @@ function Landing() {
       </section>
       <footer>
         <span className="logo-word">HeartLink.</span>
-        <span>讓緣分，從這裡開始。</span>
+        <span>心之所遇，藏在我心♡</span>
       </footer>
     </div>
   );

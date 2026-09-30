@@ -1622,8 +1622,16 @@ input[type="range"] {
   background: var(--primary-soft);
 }
 .match-card > .portrait.large {
-  height: 220px;
+  position: relative;
+  height: auto;
+  aspect-ratio: 1;
   font-size: 72px;
+}
+/* .portrait 是 grid，裡面 img 的 height: 100% 算不出來會照原比例撐高、只露出頭頂；改成絕對定位填滿，焦點偏上對準臉。 */
+.match-card > .portrait.large > img {
+  position: absolute;
+  inset: 0;
+  object-position: 50% 30%;
 }
 .match-copy {
   display: flex;
@@ -2569,9 +2577,6 @@ input[type="range"] {
   .match-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .match-card > .portrait.large {
-    height: 180px;
-  }
   .chat-layout {
     grid-template-columns: 220px minmax(0, 1fr);
     gap: 20px;
@@ -2857,9 +2862,6 @@ input[type="range"] {
   }
   .match-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .match-card > .portrait.large {
-    height: 176px;
   }
   .chat-layout {
     display: block;
