@@ -16,7 +16,7 @@ const pacifico = Pacifico({
 });
 
 export const metadata: Metadata = {
-  title: "HeartLink — 讓緣分，從這裡開始",
+  title: "HeartLink — 心之所遇，藏在我心♡",
   description: "每一次相遇，都值得期待。從共同喜好開始，認識值得好好相處的人。",
 };
 export default function RootLayout({
