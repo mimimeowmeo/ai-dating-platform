@@ -19,7 +19,6 @@
 
 ```bash
 docker compose up -d --build --wait
-docker restart ai-dating-platform-nginx-1   # 重建 web/api 後 nginx 會指著舊 IP，必須重啟
 curl -s localhost:8080/api/v1/health         # 預期 {"status":"ok","service":"dating-api"}
 ```
 
@@ -212,4 +211,3 @@ node scripts/verify/redundancy-report.mjs
 | `/matches` 的結束配對、封鎖與 socket `conversation:closed` 用無參數 `invalidateQueries()` | 會把快取一小時的 `/traits` 一起打掉重查                            |
 | 在 `/discover` 按喜歡成立配對後沒有 invalidate `/conversations`                           | 同頁右側「最近的對話」會停在舊資料約 15 秒                         |
 | 探索卡片不能點開完整檔案                                                                  | `GET /profile/:id` 目前沒有畫面入口                                |
-| 重建 `web` 或 `api` 容器後 nginx 仍指著舊 IP                                              | 會出現 502，必須 `docker restart ai-dating-platform-nginx-1`       |
