@@ -2,8 +2,11 @@
 
 import sys
 import time
+from pathlib import Path
 
-from .worker import HEARTBEAT_FILE
+# 路徑定義在這裡、由 worker.py 反過來 import：import worker.py 會載入 pydantic_ai、openai 等套件，
+# 機器忙時（例如部署重建映像）健康檢查會超過 5 秒的時限而被判定不健康。
+HEARTBEAT_FILE = Path("/tmp/ai-reply-worker-heartbeat")
 
 
 def healthy() -> bool:

@@ -19,8 +19,14 @@ import sys
 # time：這裡用 time.time() 取得目前的 Unix 時間戳（秒）。
 import time
 
-# 從 worker 模組取得心跳檔路徑，確保兩邊讀寫的是同一個檔案（路徑只在 worker.py 定義一次）。
-from .worker import HEARTBEAT_FILE
+# Path：以物件方式操作檔案路徑。
+from pathlib import Path
+
+# 心跳檔的位置：worker 健康時定期把目前時間寫進去，這裡讀它判斷 worker 是否健康。
+# 放在 /tmp 是因為容器以非 root 使用者（ai）執行，/tmp 一定可寫。
+# 路徑定義在這裡、由 worker.py 反過來 import：健康檢查每 20 秒另開一個程序執行，
+# 若 import worker.py 會連帶載入 redis、bullmq、pydantic 等套件，機器忙時會超過 5 秒的時限。
+HEARTBEAT_FILE = Path("/tmp/ai-worker-heartbeat")
 
 
 def healthy() -> bool:
